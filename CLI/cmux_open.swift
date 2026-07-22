@@ -3987,6 +3987,7 @@ extension CMUXCLI {
             appearance: appearance,
             sourceOptions: [],
             repoRoot: context.repoRoot,
+            hideFileList: true,
             runtime: runtime
         )
         let assets = try ensureDiffViewerAssets(nextTo: viewerFileURL, runtime: runtime)
@@ -7459,6 +7460,7 @@ extension CMUXCLI {
         statusMessage: String? = nil,
         statusIsError: Bool = false,
         pollForReplacement: Bool = false,
+        hideFileList: Bool = false,
         runtime: URL? = nil
     ) throws {
         if let localPatchURL {
@@ -7547,7 +7549,7 @@ extension CMUXCLI {
           <title>\(escapedTitle)</title>
           \(prepaintStyle)
         </head>
-        <body>
+        <body\(hideFileList ? " data-files-hidden=\"true\"" : "")>
           <script id="cmux-diff-viewer-config" type="application/json">\(configLiteral)</script>
           <div id="root"></div>
           <script type="module" src="\(appModuleURL)"></script>
