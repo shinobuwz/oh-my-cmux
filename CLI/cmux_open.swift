@@ -3974,17 +3974,26 @@ extension CMUXCLI {
         let timestamp = Int(Date().timeIntervalSince1970)
         let filename = "diff-\(timestamp)-\(UUID().uuidString.prefix(8)).html"
         let viewerFileURL = directory.appendingPathComponent(filename, isDirectory: false)
-        try writeStandaloneDiffViewerHTML(
+        try writeDiffViewerHTML(
             to: viewerFileURL,
             patch: input.patch,
             localPatchURL: input.localPatchURL,
             title: title,
             sourceLabel: input.sourceLabel,
-            appearance: appearance
+            externalURL: input.externalURL,
+            remotePatchURL: input.remotePatchURL,
+            layout: layout,
+            layoutSource: layoutSource,
+            appearance: appearance,
+            sourceOptions: [],
+            repoRoot: context.repoRoot,
+            hideFileList: true,
+            runtime: runtime
         )
+        let assets = try ensureDiffViewerAssets(nextTo: viewerFileURL, runtime: runtime)
         let allowedFiles = try diffViewerAllowedFiles(
             pageURLs: [viewerFileURL],
-            assets: nil,
+            assets: assets,
             mapper: mapper,
             remotePatchURLsByPagePath: remotePatchURLMap(pageURL: viewerFileURL, remoteURL: input.remotePatchURL)
         )
@@ -7073,7 +7082,7 @@ extension CMUXCLI {
 
     func diffViewerAllowedFiles(
         pageURLs: [URL],
-        assets: DiffViewerAssets? = nil,
+        assets: DiffViewerAssets,
         mapper: DiffViewerURLMapper,
         remotePatchURLsByPagePath: [String: URL] = [:]
     ) throws -> [DiffViewerAllowedFile] {
@@ -7097,10 +7106,8 @@ extension CMUXCLI {
                 files.append(try mapper.allowedRemotePatchFile(fileURL: patchURL, remoteURL: remoteURL))
             }
         }
-        if let assets {
-            for assetURL in assets.files {
-                try append(assetURL, mimeType: "text/javascript")
-            }
+        for assetURL in assets.files {
+            try append(assetURL, mimeType: "text/javascript")
         }
         return files
     }
@@ -7584,162 +7591,6 @@ extension CMUXCLI {
           }
         </style>
         """
-    }
-
-    /// Writes a fully self-contained diff viewer HTML — no external JS modules,
-    /// no file-list sidebar, no patch fetch. The patch is embedded inline and
-    /// rendered by vanilla JS. Used for single-file patch diffs opened from
-    /// the Git Diff right sidebar.
-    func writeStandaloneDiffViewerHTML(
-        to viewerURL: URL,
-        patch: String,
-        localPatchURL: URL? = nil,
-        title: String,
-        sourceLabel: String,
-        appearance: DiffViewerAppearance
-    ) throws {
-        if let localPatchURL {
-            try? FileManager.default.moveItem(at: localPatchURL, to: diffViewerPatchFileURL(for: viewerURL))
-        }
-        let escapedTitle = htmlEscaped(title)
-        let escapedSource = htmlEscaped(sourceLabel)
-        let lightFg = diffViewerCSSColor(appearance.lightTheme.foreground)
-        let darkFg = diffViewerCSSColor(appearance.darkTheme.foreground)
-        let lightBg = diffViewerCSSColor(appearance.lightTheme.background, opacity: appearance.backgroundOpacity)
-        let darkBg = diffViewerCSSColor(appearance.darkTheme.background, opacity: appearance.backgroundOpacity)
-        let fontSize = diffViewerCSSNumber(appearance.fontSize)
-        let fontFamily = appearance.fontFamily.isEmpty ? "ui-monospace, SFMono-Regular, Menlo, monospace" : htmlEscaped(appearance.fontFamily)
-        let patchJSONString = try jsonStringLiteral(patch)
-        let htmlLanguage = Locale.current.language.languageCode?.identifier ?? "en"
-        let html = """
-        <!doctype html>
-        <html lang="\(htmlEscaped(htmlLanguage))">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>\(escapedTitle)</title>
-          <style>
-            :root { color-scheme: light dark; }
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            html, body { min-height: 100%; background: transparent; }
-            body {
-              font-family: \(fontFamily);
-              font-size: \(fontSize)pt;
-              color: \(lightFg);
-              background: \(lightBg);
-              -webkit-user-select: text;
-              display: flex; flex-direction: column;
-              height: 100vh; overflow: hidden;
-            }
-            @media (prefers-color-scheme: dark) {
-              body { color: \(darkFg); background: \(darkBg); }
-            }
-            .diff-header {
-              display: flex; align-items: center; gap: 8px;
-              padding: 6px 12px;
-              border-bottom: 1px solid rgba(128,128,128,0.2);
-              font-size: 0.85em; opacity: 0.8; flex-shrink: 0;
-            }
-            .diff-header .badge {
-              font-size: 0.8em; font-weight: 600; padding: 1px 6px;
-              border-radius: 3px; background: rgba(100,200,100,0.18);
-              color: rgb(120,200,120);
-            }
-            .diff-body { overflow: auto; flex: 1; }
-            .diff-file { border-bottom: 1px solid rgba(128,128,128,0.1); }
-            .diff-file-header {
-              padding: 4px 12px; font-weight: 600; font-size: 0.9em;
-              color: rgba(255,255,255,0.6);
-              background: rgba(128,128,128,0.08);
-              position: sticky; top: 0; z-index: 1;
-            }
-            @media (prefers-color-scheme: light) {
-              .diff-file-header { color: rgba(0,0,0,0.65); }
-            }
-            .diff-hunk-header {
-              padding: 2px 12px; font-size: 0.8em; color: rgba(128,128,128,0.7);
-              background: rgba(128,128,128,0.05); position: sticky; top: 28px; z-index: 1;
-            }
-            .diff-table { width: 100%; border-collapse: collapse; }
-            .diff-table td { padding: 0; vertical-align: top; white-space: pre; }
-            .diff-line-num {
-              width: 1px; white-space: nowrap; text-align: right;
-              padding: 0 8px; color: rgba(128,128,128,0.4);
-              user-select: none; border-right: 1px solid rgba(128,128,128,0.1);
-              font-variant-numeric: tabular-nums;
-            }
-            .diff-line-code { padding: 0 8px 0 12px; }
-            .diff-add { background: rgba(80,200,80,0.12); }
-            .diff-add .diff-line-num { background: rgba(80,200,80,0.06); }
-            .diff-del { background: rgba(230,80,80,0.12); }
-            .diff-del .diff-line-num { background: rgba(230,80,80,0.06); }
-            .diff-add .diff-line-code::before { content: "+"; opacity: 0.5; margin-right: 4px; }
-            .diff-del .diff-line-code::before { content: "−"; opacity: 0.5; margin-right: 4px; }
-            .empty { padding: 40px; text-align: center; opacity: 0.5; }
-          </style>
-        </head>
-        <body>
-          <div class="diff-header">
-            <span class="badge" id="stats"></span>
-            <span>\(escapedSource)</span>
-          </div>
-          <script id="patch-data" type="application/json">\(patchJSONString)</script>
-          <script>
-          (function(){
-            var patch = JSON.parse(document.getElementById('patch-data').textContent);
-            var body = document.getElementById('body');
-            var stats = document.getElementById('stats');
-            var addCount=0, delCount=0;
-            var lines = patch.split('\\n');
-            var i=0;
-            var frag = document.createDocumentFragment();
-            function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-            while(i<lines.length){
-              var line=lines[i];
-              if(line.startsWith('diff --git')||line.startsWith('---')||line.startsWith('+++')){
-                var fileDiv=document.createElement('div');fileDiv.className='diff-file';
-                var fh=document.createElement('div');fh.className='diff-file-header';
-                var headerText='';
-                while(i<lines.length&&(lines[i].startsWith('diff --git')||lines[i].startsWith('---')||lines[i].startsWith('+++')||lines[i].startsWith('index ')||lines[i].startsWith('new file')||lines[i].startsWith('deleted file')||lines[i].startsWith('old mode')||lines[i].startsWith('new mode')||lines[i].startsWith('similarity ')||lines[i].startsWith('rename ')||lines[i].startsWith('copy '))){
-                  if(lines[i].startsWith('+++ ')||lines[i].startsWith('--- ')){headerText=lines[i].replace(/^\\+\\+\\+ /,'').replace(/^--- /,'').replace(/^[ab]\\//,'');}
-                  i++;
-                }
-                fh.textContent=headerText||'(file)';
-                fileDiv.appendChild(fh);
-                while(i<lines.length&&!lines[i].startsWith('diff --git')){
-                  if(lines[i].startsWith('@@')){
-                    var hh=document.createElement('div');hh.className='diff-hunk-header';
-                    hh.textContent=lines[i];fileDiv.appendChild(hh);i++;
-                    var oldLine=0,newLine=0;
-                    var m=lines[i-1].match(/@@\\s+-(\\d+)(?:,\\d+)?\\s+\\+(\\d+)(?:,\\d+)?\\s+@@/);
-                    if(m){oldLine=parseInt(m[1]);newLine=parseInt(m[2]);}
-                    var tbl=document.createElement('table');tbl.className='diff-table';var tb=document.createElement('tbody');
-                    while(i<lines.length&&!lines[i].startsWith('@@')&&!lines[i].startsWith('diff --git')){
-                      var tr=document.createElement('tr');
-                      var numTd=document.createElement('td');numTd.className='diff-line-num';
-                      var codeTd=document.createElement('td');codeTd.className='diff-line-code';
-                      var cl=lines[i];i++;
-                      if(cl.startsWith('+')){tr.className='diff-add';numTd.innerHTML='';codeTd.innerHTML=esc(cl.slice(1));addCount++;}
-                      else if(cl.startsWith('-')){tr.className='diff-del';numTd.innerHTML='';codeTd.innerHTML=esc(cl.slice(1));delCount++;}
-                      else if(cl.startsWith('\\\\')){tr.style.display='none';}
-                      else{numTd.textContent=oldLine;codeTd.textContent=cl.startsWith(' ')?cl.slice(1):cl;oldLine++;}
-                      tr.appendChild(numTd);tr.appendChild(codeTd);tb.appendChild(tr);
-                    }
-                    tbl.appendChild(tb);fileDiv.appendChild(tbl);
-                  }else{i++;}
-                }
-                frag.appendChild(fileDiv);
-              }else{i++;}
-            }
-            if(!frag.childElementCount){body.innerHTML='<div class="empty">No changes</div>';}
-            else{body.appendChild(frag);}
-            stats.textContent='+'+addCount+' −'+delCount;
-          })();
-          </script>
-        </body>
-        </html>
-        """
-        try html.write(to: viewerURL, atomically: true, encoding: .utf8)
     }
 
     private func diffViewerCSSColor(_ rawValue: String, opacity: Double = 1) -> String {
