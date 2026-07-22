@@ -725,6 +725,9 @@ final class FileExplorerStore: ObservableObject {
     private var directoryWatcher: FileWatcher?
     private var directoryWatchTask: Task<Void, Never>?
     private var directoryWatchPath: String?
+    /// Periodic git-status refresh so deeply-nested changes (which the
+    /// non-recursive root watcher cannot see) still surface within a few seconds.
+    private var periodicGitRefreshTask: Task<Void, Never>?
 
     /// Paths that are logically expanded (persisted across provider changes)
     private(set) var expandedPaths: Set<String> = []
@@ -820,6 +823,7 @@ final class FileExplorerStore: ObservableObject {
         reload()
         refreshGitStatus()
         updateDirectoryWatcher()
+        updatePeriodicGitRefresh()
     }
 
     func refreshGitStatus() {
@@ -884,6 +888,24 @@ final class FileExplorerStore: ObservableObject {
             }
         } else {
             stopDirectoryWatcher()
+        }
+    }
+    /// Starts or restarts a bounded periodic git-status refresh. The root
+    /// `FileWatcher` is non-recursive (DispatchSource on one directory), so
+    /// edits to deeply-nested files do not fire a directory event at the root.
+    /// This timer is the backstop that re-pulls status every few seconds.
+    private func updatePeriodicGitRefresh() {
+        periodicGitRefreshTask?.cancel()
+        guard !rootPath.isEmpty else {
+            periodicGitRefreshTask = nil
+            return
+        }
+        periodicGitRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self, !Task.isCancelled else { break }
+                self.refreshGitStatus()
+            }
         }
     }
 
@@ -1282,5 +1304,6 @@ final class FileExplorerStore: ObservableObject {
     deinit {
         cancelRemoteHomeResolution()
         directoryWatchTask?.cancel()
+        periodicGitRefreshTask?.cancel()
     }
 }

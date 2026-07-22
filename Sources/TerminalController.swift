@@ -6654,6 +6654,10 @@ class TerminalController {
         var navigationTicket: BrowserAutomationNavigationTicket?
         var navigationTargetURL: URL?
         v2MainSync {
+            if let regError = v2RegisterDiffViewerURLIfNeeded(params: params, url: URL(string: url)) {
+                resolutionError = regError
+                return
+            }
             let resolvedContext = v2ResolveBrowserPanelContext(params: params, tabManager: tabManager)
             if let error = resolvedContext.error {
                 resolutionError = error

@@ -6906,6 +6906,14 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.newWorktree",
+                title: constant(String(localized: "sidebar.extension.createWorktree", defaultValue: "Create worktree")),
+                subtitle: constant(String(localized: "command.newWorkspace.subtitle", defaultValue: "Workspace")),
+                keywords: ["create", "new", "worktree", "git", "branch"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.newBrowserWorkspace",
                 title: constant(String(localized: "command.newBrowserWorkspace.title", defaultValue: "New Browser Workspace")),
                 subtitle: constant(String(localized: "command.newBrowserWorkspace.subtitle", defaultValue: "Workspace")),
@@ -8132,6 +8140,11 @@ struct ContentView: View {
                 tabManager: tabManager,
                 debugSource: "palette.newWorkspace"
             )
+        }
+        registry.register(commandId: "palette.newWorktree") {
+            DispatchQueue.main.async {
+                CmuxExtensionSidebarSelection.setProviderId(CmuxExtensionSidebarSelection.nativeGitWorktreesProviderId)
+            }
         }
         registry.register(commandId: "palette.newBrowserWorkspace") {
             // Let command-palette dismissal complete first so omnibar focus
@@ -10052,6 +10065,7 @@ enum CmuxExtensionSidebarSelection {
     static let selectedExtensionNameDefaultsKey = "cmuxExtensionSidebar.selectedExtensionName"
     static let defaultProviderId = CmuxSidebarProviderDescriptor.defaultWorkspacesID
     static let hostedExtensionsProviderId = "cmux.sidebar.extensions"
+    static let nativeGitWorktreesProviderId = "cmux.sidebar.git-worktrees"
 
     /// Synchronous read of the experimental Extensions flag for the on-demand
     /// AppKit/static paths (the toggle menu, the command-palette builder, the
@@ -10159,7 +10173,7 @@ enum CmuxExtensionSidebarSelection {
     /// independently of the experimental Extensions feature, so they stay in
     /// the switcher menu regardless of the beta flag.
     static var builtInDescriptors: [CmuxSidebarProviderDescriptor] {
-        [.defaultWorkspaces] + providers.map { $0.descriptor }
+        [.defaultWorkspaces, nativeGitWorktreesDescriptor] + providers.map { $0.descriptor }
     }
 
     /// Descriptors offered in the switcher menu and command palette. The hosted
@@ -10177,6 +10191,22 @@ enum CmuxExtensionSidebarSelection {
     /// handler to invoke; what is *shown* uses ``descriptors``.
     static var allDescriptors: [CmuxSidebarProviderDescriptor] {
         builtInDescriptors + [hostedExtensionsDescriptor] + customSidebarDescriptors
+    }
+
+    static var nativeGitWorktreesDescriptor: CmuxSidebarProviderDescriptor {
+        CmuxSidebarProviderDescriptor(
+            id: nativeGitWorktreesProviderId,
+            title: CmuxSidebarProviderLocalizedText(
+                key: "gitWorktrees.provider.title",
+                defaultValue: String(localized: "gitWorktrees.provider.title", defaultValue: "Git Worktrees")
+            ),
+            subtitle: CmuxSidebarProviderLocalizedText(
+                key: "gitWorktrees.provider.subtitle",
+                defaultValue: String(localized: "gitWorktrees.provider.subtitle", defaultValue: "Repositories and branches")
+            ),
+            systemImageName: "arrow.triangle.branch",
+            isHostProvided: false
+        )
     }
 
     static var hostedExtensionsDescriptor: CmuxSidebarProviderDescriptor {
@@ -10218,7 +10248,7 @@ enum CmuxExtensionSidebarSelection {
     /// non-default view.
     static func resolvesToDefaultSidebar(effectiveProviderId id: String) -> Bool {
         if id == defaultProviderId { return true }
-        if id == hostedExtensionsProviderId { return false }
+        if id == hostedExtensionsProviderId || id == nativeGitWorktreesProviderId { return false }
         if id.hasPrefix(customSidebarProviderPrefix) {
             // A custom selection survives only while its backing file exists;
             // otherwise the descriptor lookup falls back to the default sidebar.
@@ -10457,7 +10487,6 @@ struct VerticalTabsSidebar: View, Equatable {
     @State private var frozenShortcutHintsValue: Bool = false
     @State private var pendingSelectedWorkspaceScrollId: UUID?
     @State private var collapsedExtensionSidebarSectionIds: Set<String> = []
-    @State private var extensionSidebarWorktreeCreationInFlightSectionIds: Set<String> = []
     // Per-workspace transient checklist UI state (never persisted): which
     // rows show their expanded checklist, and a monotonically bumped token
     // per workspace that arms the row's add-item field after a context-menu
@@ -10477,6 +10506,7 @@ struct VerticalTabsSidebar: View, Equatable {
     /// so per-width-tick body evals skip the row-projection prelude. Plain
     /// (non-observed) box: writing it from body cannot re-trigger a render.
     @State private var appKitFrozenTableRowsBox = SidebarAppKitFrozenRowsBox()
+    @StateObject private var gitWorktreeStore = GitWorktreeStore()
     /// Bumped once per interactive-resize end: an apply during the drag
     /// serves frozen rows, so content that changed mid-drag (renames,
     /// notifications) would otherwise stay unrendered until the next
@@ -11713,7 +11743,30 @@ struct VerticalTabsSidebar: View, Equatable {
 
     @ViewBuilder
     private func extensionSidebarScrollAreaContent(renderContext: WorkspaceListRenderContext) -> some View {
-        if effectiveExtensionSidebarProviderId == CmuxExtensionSidebarSelection.hostedExtensionsProviderId {
+        if effectiveExtensionSidebarProviderId == CmuxExtensionSidebarSelection.nativeGitWorktreesProviderId {
+            GitWorktreeSidebarView(
+                store: gitWorktreeStore,
+                onOpenWorktree: { path, title in
+                    tabManager.addWorkspace(
+                        title: title,
+                        workingDirectory: path,
+                        inheritWorkingDirectory: false,
+                        select: true,
+                        eagerLoadTerminal: false,
+                        autoWelcomeIfNeeded: false
+                    )
+                }
+            )
+            .onAppear {
+                Task {
+                    if let workingDirectory = tabManager.selectedWorkspace?.resolvedWorkingDirectory() {
+                        _ = await gitWorktreeStore.addRepository(path: workingDirectory)
+                    } else {
+                        await gitWorktreeStore.refreshAll()
+                    }
+                }
+            }
+        } else if effectiveExtensionSidebarProviderId == CmuxExtensionSidebarSelection.hostedExtensionsProviderId {
             CMUXInstalledExtensionSidebarHostView(
                 snapshotProvider: { cmuxSidebarSnapshotForCurrentTabs() },
                 snapshotUpdateToken: extensionSidebarUpdateToken,
@@ -12732,7 +12785,6 @@ struct VerticalTabsSidebar: View, Equatable {
         now: Date
     ) -> some View {
         let isCollapsed = collapsedExtensionSidebarSectionIds.contains(section.id)
-        let canCreateWorktree = section.treeSection.projectRootPath != nil
         let selectedWorkspaceId = tabManager.selectedTabId
         let workspaceSnapshotsById = extensionSidebarWorkspaceSnapshotsById(for: section.rows)
 
@@ -12761,21 +12813,6 @@ struct VerticalTabsSidebar: View, Equatable {
 
                 Spacer(minLength: 0)
 
-                if canCreateWorktree {
-                    let worktreeButtonSymbol = extensionSidebarWorktreeCreationInFlightSectionIds.contains(section.id)
-                        ? "clock"
-                        : "plus"
-                    Button {
-                        createExtensionWorktreeWorkspace(for: section.treeSection)
-                    } label: {
-                        CmuxSystemSymbolImage(magnified: worktreeButtonSymbol, pointSize: 11, weight: .regular)
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(extensionSidebarWorktreeCreationInFlightSectionIds.contains(section.id))
-                    .safeHelp(String(localized: "sidebar.extension.createWorktree", defaultValue: "Create worktree"))
-                    .accessibilityIdentifier("ExtensionSidebarCreateWorktreeButton.\(section.id)")
-                }
             }
             .padding(.horizontal, 10)
             .padding(.top, 10)
@@ -12823,35 +12860,8 @@ struct VerticalTabsSidebar: View, Equatable {
         tabManager.selectWorkspace(workspace)
     }
 
-    private func createExtensionWorktreeWorkspace(for section: CmuxSidebarProviderTreeSection) {
-        guard let projectRootPath = section.projectRootPath,
-              !extensionSidebarWorktreeCreationInFlightSectionIds.contains(section.id) else {
-            return
-        }
 
-        extensionSidebarWorktreeCreationInFlightSectionIds.insert(section.id)
-        Task {
-            do {
-                let result = try await CmuxExtensionWorktreePrototype.createWorktree(projectRootPath: projectRootPath)
-                let spawnArgs = result.workspaceSpawnArgs()
-                tabManager.addWorkspace(
-                    title: spawnArgs.title,
-                    workingDirectory: spawnArgs.workingDirectory,
-                    initialTerminalInput: spawnArgs.initialTerminalInput,
-                    inheritWorkingDirectory: spawnArgs.inheritWorkingDirectory,
-                    select: true,
-                    eagerLoadTerminal: false,
-                    autoWelcomeIfNeeded: spawnArgs.initialTerminalInput == nil
-                )
-            } catch {
-                NSSound.beep()
-#if DEBUG
-                cmuxDebugLog("extensionSidebar.worktree.failed project=\(projectRootPath) error=\(error.localizedDescription)")
-#endif
-            }
-            extensionSidebarWorktreeCreationInFlightSectionIds.remove(section.id)
-        }
-    }
+
 
     private func workspaceScrollContent(
         renderContext: WorkspaceListRenderContext,

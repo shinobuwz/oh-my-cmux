@@ -155,6 +155,7 @@ extension CMUXCLI {
         var workspace: String?
         var window: String?
         var surface: String?
+        var targetSurface: String?
         var focus: String?
         var noFocus = false
         var title: String?
@@ -1015,6 +1016,58 @@ extension CMUXCLI {
 
         try resolveTargetIfNeeded()
         let activeClient = try connectedClient()
+        if let targetSurfaceRaw = parsedArgs.targetSurface {
+            let resolvedTarget = try normalizeSurfaceHandle(
+                targetSurfaceRaw,
+                client: activeClient,
+                workspaceHandle: workspaceHandle,
+                windowHandle: windowHandle
+            )
+            guard let targetSurfaceId = resolvedTarget else {
+                throw CLIError(message: "diff --target-surface requires a valid surface id")
+            }
+            var navParams: [String: Any] = [
+                "url": viewer.url.absoluteString,
+                "focus": focus,
+                "surface_id": targetSurfaceId
+            ]
+            if let workspaceHandle { navParams["workspace_id"] = workspaceHandle }
+            if let windowHandle { navParams["window_id"] = windowHandle }
+            if viewer.url.scheme == DiffViewerURLMapper.scheme {
+                navParams["diff_viewer_token"] = (viewer.url.host ?? "")
+                navParams["diff_viewer_files"] = viewer.allowedFiles.map(\.jsonObject)
+            } else {
+                navParams["diff_viewer_token"] = viewer.url.path.split(separator: "/").first.map(String.init) ?? ""
+            }
+            let navPayload = try activeClient.sendV2(method: "browser.navigate", params: navParams)
+            let completedViewer: DiffViewerWriteResult
+            do {
+                completedViewer = try completeDeferredDiffViewer(viewer)
+            } catch {
+                try navigateCompletedDiffViewerIfNeeded(
+                    viewer.completeDeferred != nil, viewer.url.scheme, navPayload,
+                    viewer.url, viewer.url, socketPath, explicitPassword
+                )
+                throw error
+            }
+            try navigateCompletedDiffViewerIfNeeded(
+                viewer.completeDeferred != nil, viewer.url.scheme, navPayload,
+                viewer.url, completedViewer.url, socketPath, explicitPassword
+            )
+            if jsonOutput {
+                var response = navPayload
+                response["path"] = completedViewer.fileURL.path
+                response["url"] = completedViewer.url.absoluteString
+                response["title"] = completedViewer.title
+                response["source"] = completedViewer.input.sourceLabel
+                response["surface_id"] = targetSurfaceId
+                response["reused"] = true
+                print(jsonString(formatIDs(response, mode: idFormat)))
+                return
+            }
+            print("OK surface=\(formatHandle(navPayload, kind: "surface", idFormat: idFormat) ?? "unknown") pane=\(formatHandle(navPayload, kind: "pane", idFormat: idFormat) ?? "unknown")")
+            return
+        }
 
         var params: [String: Any] = [
             "url": viewer.url.absoluteString,
@@ -1315,6 +1368,10 @@ extension CMUXCLI {
                     parsed.surface = try openOptionValue(commandArgs, index: index, name: arg)
                     index += 2
                     continue
+                case "--target-surface":
+                    parsed.targetSurface = try openOptionValue(commandArgs, index: index, name: arg)
+                    index += 2
+                    continue
                 case "--session", "--agent-session":
                     parsed.sessionId = try openOptionValue(commandArgs, index: index, name: arg)
                     index += 2
@@ -1373,7 +1430,7 @@ extension CMUXCLI {
                     continue
                 default:
                     if arg.hasPrefix("-"), arg != "-" {
-                        throw CLIError(message: "diff: unknown flag '\(arg)'. Usage: cmux diff [patch-file|-] [--source <unstaged|staged|branch|last-turn>] [--workspace <id|ref|index>] [--surface <id|ref|index>] [--window <id|ref|index>] [--session <id>] [--cwd <path>] [--base <ref>] [--focus true|false] [--no-focus] [--title <text>] [--layout split|unified] [--font-size <points>]")
+                        throw CLIError(message: "diff: unknown flag '\(arg)'. Usage: cmux diff [patch-file|-] [--source <unstaged|staged|branch|last-turn>] [--workspace <id|ref|index>] [--surface <id|ref|index>] [--target-surface <id|ref|index>] [--window <id|ref|index>] [--session <id>] [--cwd <path>] [--base <ref>] [--focus true|false] [--no-focus] [--title <text>] [--layout split|unified] [--font-size <points>]")
                     }
                 }
             }
@@ -7906,6 +7963,7 @@ extension CMUXCLI {
           --last-turn                  Show changes since this surface's last agent-turn baseline
           --workspace <id|ref|index>   Target workspace (default: $CMUX_WORKSPACE_ID)
           --surface <id|ref|index>     Source surface to split from (default: $CMUX_SURFACE_ID)
+          --target-surface <id|ref|index>  Reuse an existing browser surface instead of splitting
           --session <id>               Scope --last-turn to one agent session
           --window <id|ref|index>      Target window
           --cwd, --repo <path>          Git repository or worktree path for git sources

@@ -17,6 +17,7 @@ enum RightSidebarMode: String, CaseIterable, Codable, Sendable {
     case files
     case find
     case sessions
+    case diff
     case feed
     case dock
     case customSidebar = "custom-sidebar"
@@ -26,6 +27,7 @@ enum RightSidebarMode: String, CaseIterable, Codable, Sendable {
         case .files: return String(localized: "rightSidebar.mode.files", defaultValue: "Files")
         case .find: return String(localized: "rightSidebar.mode.find", defaultValue: "Find")
         case .sessions: return String(localized: "rightSidebar.mode.sessions", defaultValue: "Vault")
+        case .diff: return String(localized: "rightSidebar.mode.diff", defaultValue: "Diff")
         case .feed: return String(localized: "rightSidebar.mode.feed", defaultValue: "Feed")
         case .dock: return String(localized: "rightSidebar.mode.dock", defaultValue: "Dock")
         case .customSidebar: return String(localized: "rightSidebar.mode.customSidebar", defaultValue: "Custom")
@@ -37,6 +39,7 @@ enum RightSidebarMode: String, CaseIterable, Codable, Sendable {
         case .files: return "folder"
         case .find: return "magnifyingglass"
         case .sessions: return "books.vertical"
+        case .diff: return "doc.text.magnifyingglass"
         case .feed: return "dot.radiowaves.left.and.right"
         case .dock: return "dock.rectangle"
         case .customSidebar: return "wand.and.stars"
@@ -48,6 +51,7 @@ enum RightSidebarMode: String, CaseIterable, Codable, Sendable {
         case .files: return .switchRightSidebarToFiles
         case .find: return .switchRightSidebarToFind
         case .sessions: return .switchRightSidebarToSessions
+        case .diff: return nil
         case .feed: return .switchRightSidebarToFeed
         case .dock: return .switchRightSidebarToDock
         case .customSidebar: return nil
@@ -73,7 +77,7 @@ enum FileExplorerRootSyncPolicy {
     static func shouldSyncFileExplorerStore(isRightSidebarVisible: Bool, mode: RightSidebarMode) -> Bool {
         guard isRightSidebarVisible else { return false }
         switch mode {
-        case .files, .find:
+        case .files, .find, .diff:
             return true
         case .sessions, .feed, .dock, .customSidebar:
             return false
@@ -245,6 +249,7 @@ struct RightSidebarPanelView: View {
                         }
                     }
                 }
+
                 Spacer(minLength: 0)
                 if fileExplorerState.mode.canOpenAsPane {
                     openAsPaneButton(mode: fileExplorerState.mode)
@@ -344,6 +349,30 @@ struct RightSidebarPanelView: View {
         .shortcutHintVisibilityAnimation(value: showsShortcutHint)
         .titlebarInteractiveControl()
     }
+    private var openDiffButton: some View {
+        Button {
+            guard AppDelegate.shared?.openDirectoryDiffViewerForFocusedWorkspace(for: tabManager) == true else {
+                NSSound.beep()
+                return
+            }
+        } label: {
+            HeaderChromeIconStyle.symbol("doc.text.magnifyingglass")
+        }
+        .buttonStyle(RightSidebarHeaderIconButtonStyle(iconGeometryKeyPrefix: "rightSidebarHeaderDiffIcon"))
+        .frame(
+            width: RightSidebarChromeMetrics.headerControlSize,
+            height: RightSidebarChromeMetrics.headerControlSize
+        )
+        .reportRightSidebarChromeNamedGeometryForBonsplitUITest(
+            keyPrefix: "rightSidebarHeaderDiff",
+            isVisible: true
+        )
+        .rightSidebarHeaderControlAlignment()
+        .safeHelp(String(localized: "command.openDirectoryDiffViewer.title", defaultValue: "Open Directory Diff Viewer"))
+        .accessibilityLabel(String(localized: "command.openDirectoryDiffViewer.title", defaultValue: "Open Directory Diff Viewer"))
+        .accessibilityIdentifier("RightSidebar.openDiffButton")
+        .titlebarInteractiveControl()
+    }
 
     @ViewBuilder
     private var focusShortcutHintOverlay: some View {
@@ -397,6 +426,8 @@ struct RightSidebarPanelView: View {
                     .onAppear {
                         sessionIndexStore.setCurrentDirectoryIfChanged(sessionIndexDirectory)
                     }
+            case .diff:
+                GitDiffPanelView(directory: fileExplorerStore.rootPath, workspaceId: workspaceId)
             case .feed:
                 FeedPanelView()
             case .dock:
@@ -549,5 +580,564 @@ extension NSView {
             view = current.superview
         }
         return true
+    }
+}
+
+private enum GitDiffFileStatus: String, Sendable {
+    case modified
+    case added
+    case deleted
+    case renamed
+    case conflicted
+    case untracked
+
+    var marker: String {
+        switch self {
+        case .modified: return "M"
+        case .added: return "A"
+        case .deleted: return "D"
+        case .renamed: return "R"
+        case .conflicted: return "U"
+        case .untracked: return "?"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .modified: return .orange
+        case .added: return .green
+        case .deleted, .conflicted: return .red
+        case .renamed: return .blue
+        case .untracked: return .secondary
+        }
+    }
+}
+
+private struct GitDiffFileSnapshot: Identifiable, Sendable {
+    let id: String
+    let path: String
+    let status: GitDiffFileStatus
+
+    var basename: String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
+}
+
+private struct GitDiffCommandOutput: Sendable {
+    let status: Int32
+    let standardOutput: Data
+    let standardError: Data
+}
+
+@MainActor
+private final class GitDiffSnapshotStore: ObservableObject {
+    @Published private(set) var files: [GitDiffFileSnapshot] = []
+    @Published private(set) var isGitRepository = false
+    @Published private(set) var isLoading = false
+    @Published private(set) var errorMessage: String?
+
+    private var directory = ""
+    private var refreshTask: Task<Void, Never>?
+    private var scanTask: Task<Void, Never>?
+    private var revision = 0
+    private var refreshGeneration = 0
+
+    deinit {
+        refreshTask?.cancel()
+        scanTask?.cancel()
+    }
+
+    func setDirectory(_ path: String) {
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard normalized != directory else { return }
+        directory = normalized
+        revision &+= 1
+        refreshGeneration &+= 1
+        refreshTask?.cancel()
+        scanTask?.cancel()
+        scanTask = nil
+        files = []
+        errorMessage = nil
+        isGitRepository = false
+        isLoading = false
+        guard !normalized.isEmpty else { return }
+        refresh()
+        refreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, let self else { return }
+                self.refresh()
+            }
+        }
+    }
+
+    func refresh(force: Bool = false) {
+        guard !directory.isEmpty else { return }
+        if !force, isLoading { return }
+        let path = directory
+        let expectedRevision = revision
+        refreshGeneration &+= 1
+        let expectedGeneration = refreshGeneration
+        scanTask?.cancel()
+        isLoading = true
+        scanTask = Task { [weak self] in
+            let result = await GitDiffSnapshotStore.loadSnapshot(at: path)
+            guard let self,
+                  expectedRevision == self.revision,
+                  expectedGeneration == self.refreshGeneration,
+                  path == self.directory else { return }
+            self.scanTask = nil
+            self.isLoading = false
+            switch result {
+            case .success(let snapshot):
+                self.isGitRepository = true
+                self.errorMessage = nil
+                self.files = snapshot
+            case .failure(let error):
+                let isNotRepository = Self.isNotRepository(error)
+                self.isGitRepository = !isNotRepository
+                self.errorMessage = isNotRepository ? nil : error.localizedDescription
+                self.files = []
+            }
+        }
+    }
+
+    nonisolated static func loadPatch(
+        at directory: String,
+        relativePath: String,
+        status: GitDiffFileStatus
+    ) async -> Result<String, NSError> {
+        if status == .untracked {
+            let result = await runGit(
+                at: directory,
+                arguments: [
+                    "diff", "--no-index", "--no-ext-diff", "--no-color", "--unified=3",
+                    "--", "/dev/null", relativePath
+                ]
+            )
+            switch result {
+            case .success(let output) where output.status == 0 || output.status == 1:
+                return .success(String(decoding: output.standardOutput, as: UTF8.self))
+            case .success(let output):
+                return .failure(commandError(output, fallback: String(localized: "gitWorktrees.diff.patchFailed", defaultValue: "Git could not create a patch.")))
+            case .failure(let error):
+                return .failure(error)
+            }
+        }
+
+        let headResult = await runGit(
+            at: directory,
+            arguments: ["diff", "HEAD", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath]
+        )
+        if case .success(let output) = headResult, output.status == 0 {
+            return .success(String(decoding: output.standardOutput, as: UTF8.self))
+        }
+
+        guard case .success(let headOutput) = headResult,
+              headOutput.status == 128 || headOutput.status == 129 else {
+            if case .failure(let error) = headResult { return .failure(error) }
+            if case .success(let output) = headResult {
+                return .failure(commandError(output, fallback: String(localized: "gitWorktrees.diff.patchFailed", defaultValue: "Git could not create a patch.")))
+            }
+            return .failure(NSError(domain: "GitDiff", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: String(localized: "gitWorktrees.diff.patchFailed", defaultValue: "Git could not create a patch.")
+            ]))
+        }
+
+        let stagedResult = await runGit(
+            at: directory,
+            arguments: ["diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath]
+        )
+        let unstagedResult = await runGit(
+            at: directory,
+            arguments: ["diff", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath]
+        )
+        var patch = Data()
+        for result in [stagedResult, unstagedResult] {
+            guard case .success(let output) = result, output.status == 0 else { continue }
+            patch.append(output.standardOutput)
+        }
+        if !patch.isEmpty { return .success(String(decoding: patch, as: UTF8.self)) }
+        if case .success(let output) = stagedResult, output.status != 0 {
+            return .failure(commandError(output, fallback: String(localized: "gitWorktrees.diff.patchFailed", defaultValue: "Git could not create a patch.")))
+        }
+        if case .success(let output) = unstagedResult, output.status != 0 {
+            return .failure(commandError(output, fallback: String(localized: "gitWorktrees.diff.patchFailed", defaultValue: "Git could not create a patch.")))
+        }
+        return .success("")
+    }
+
+    nonisolated private static func loadSnapshot(
+        at directory: String
+    ) async -> Result<[GitDiffFileSnapshot], NSError> {
+        let result = await runGit(
+            at: directory,
+            arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        )
+        switch result {
+        case .success(let output) where output.status == 0:
+            return .success(parseStatuses(output.standardOutput))
+        case .success(let output):
+            return .failure(commandError(output, fallback: String(localized: "gitWorktrees.diff.statusFailed", defaultValue: "Git status failed.")))
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    nonisolated private static func parseStatuses(_ data: Data) -> [GitDiffFileSnapshot] {
+        let records = String(decoding: data, as: UTF8.self)
+            .split(separator: "\0", omittingEmptySubsequences: true)
+        var files: [GitDiffFileSnapshot] = []
+        var index = 0
+        while index < records.count {
+            let record = records[index]
+            let characters = Array(record)
+            guard characters.count >= 4 else {
+                index += 1
+                continue
+            }
+            let indexCode = characters[0]
+            let worktreeCode = characters[1]
+            let path = String(record.dropFirst(3))
+            index += 1
+            if indexCode == "R" || indexCode == "C" || worktreeCode == "R" || worktreeCode == "C" {
+                index += 1
+            }
+            guard !path.isEmpty, let status = status(index: indexCode, worktree: worktreeCode) else { continue }
+            files.append(GitDiffFileSnapshot(id: path, path: path, status: status))
+        }
+        return files
+    }
+
+    nonisolated private static func status(index: Character, worktree: Character) -> GitDiffFileStatus? {
+        if index == "?" && worktree == "?" { return .untracked }
+        if index == "U" || worktree == "U" { return .conflicted }
+        if index == "D" || worktree == "D" { return .deleted }
+        if index == "R" || worktree == "R" { return .renamed }
+        if index == "A" || worktree == "A" || index == "C" || worktree == "C" { return .added }
+        if index == "M" || worktree == "M" || index == "T" || worktree == "T" { return .modified }
+        return nil
+    }
+
+    nonisolated private static func runGit(
+        at directory: String,
+        arguments: [String]
+    ) async -> Result<GitDiffCommandOutput, NSError> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", directory] + arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
+        environment["GIT_PAGER"] = "cat"
+        process.environment = environment
+
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+        do {
+            try process.run()
+        } catch {
+            return .failure(NSError(domain: "GitDiff", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: error.localizedDescription
+            ]))
+        }
+
+        let outputTask = Task.detached(priority: .utility) {
+            standardOutput.fileHandleForReading.readDataToEndOfFile()
+        }
+        let errorTask = Task.detached(priority: .utility) {
+            standardError.fileHandleForReading.readDataToEndOfFile()
+        }
+        let output = await outputTask.value
+        let error = await errorTask.value
+        process.waitUntilExit()
+        return .success(GitDiffCommandOutput(
+            status: process.terminationStatus,
+            standardOutput: output,
+            standardError: error
+        ))
+    }
+
+    nonisolated private static func commandError(
+        _ output: GitDiffCommandOutput,
+        fallback: String
+    ) -> NSError {
+        let details = String(decoding: output.standardError, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return NSError(domain: "GitDiff", code: Int(output.status), userInfo: [
+            NSLocalizedDescriptionKey: details.isEmpty ? fallback : details
+        ])
+    }
+
+    nonisolated private static func isNotRepository(_ error: NSError) -> Bool {
+        error.code == 128 || error.code == 129 ||
+            error.localizedDescription.localizedCaseInsensitiveContains("not a git repository")
+    }
+}
+
+private struct GitDiffPanelView: View {
+    let directory: String
+    let workspaceId: UUID?
+    @StateObject private var store = GitDiffSnapshotStore()
+    @State private var collapsedFolders: Set<String> = []
+    @State private var selectedFilePath: String?
+    @State private var openError: String?
+
+    init(directory: String, workspaceId: UUID?) {
+        self.directory = directory
+        self.workspaceId = workspaceId
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            if directory.isEmpty {
+                GitDiffEmptyState(text: String(localized: "gitWorktrees.diff.noDirectory", defaultValue: "Select a workspace to view its diff."), symbol: "folder")
+            } else if !store.isGitRepository && !store.isLoading {
+                GitDiffEmptyState(text: String(localized: "gitWorktrees.diff.notRepository", defaultValue: "This workspace is not a Git repository."), symbol: "questionmark.folder")
+            } else if let errorMessage = store.errorMessage, !store.isLoading {
+                GitDiffEmptyState(
+                    text: errorMessage,
+                    symbol: "exclamationmark.triangle",
+                    actionTitle: String(localized: "gitWorktrees.diff.retry", defaultValue: "Retry"),
+                    action: { store.refresh(force: true) }
+                )
+            } else if store.isLoading && store.files.isEmpty {
+                GitDiffEmptyState(text: String(localized: "gitWorktrees.diff.loading", defaultValue: "Loading changes…"), symbol: "arrow.triangle.2.circlepath")
+            } else if store.files.isEmpty && !store.isLoading {
+                GitDiffEmptyState(text: String(localized: "gitWorktrees.diff.clean", defaultValue: "No changes."), symbol: "checkmark.circle")
+            } else {
+                changesList
+            }
+        }
+        .onAppear { store.setDirectory(directory) }
+        .onChange(of: directory) { _, newValue in store.setDirectory(newValue) }
+        .alert(
+            String(localized: "gitWorktrees.diff.openError.title", defaultValue: "Unable to open diff"),
+            isPresented: Binding(
+                get: { openError != nil },
+                set: { if !$0 { openError = nil } }
+            )
+        ) {
+            Button(String(localized: "common.ok", defaultValue: "OK"), role: .cancel) { openError = nil }
+        } message: {
+            Text(openError ?? String(localized: "gitWorktrees.diff.openError.message", defaultValue: "The file diff could not be opened."))
+        }
+    }
+
+    private var header: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(String(localized: "gitWorktrees.diff.title", defaultValue: "Git Diff"))
+                        .font(.system(size: 11, weight: .semibold))
+                    if !directory.isEmpty {
+                        Text(directoryDisplayName)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 0)
+                if store.isLoading { ProgressView().controlSize(.mini) }
+                Button { store.refresh(force: true) } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .help(String(localized: "diffViewer.refresh", defaultValue: "Refresh"))
+                .accessibilityLabel(String(localized: "diffViewer.refresh", defaultValue: "Refresh"))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.65))
+        .overlay(alignment: .bottom) { Divider().opacity(0.35) }
+    }
+
+    private var changesList: some View {
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(groupedFiles, id: \.folder) { group in
+                    folderHeader(group)
+                    if !collapsedFolders.contains(group.folder) {
+                        ForEach(group.files) { file in
+                            fileRow(file)
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .scrollIndicators(.automatic)
+    }
+
+    private func folderHeader(_ group: (folder: String, files: [GitDiffFileSnapshot])) -> some View {
+        let isCollapsed = collapsedFolders.contains(group.folder)
+        let folderName = group.folder.isEmpty
+            ? String(localized: "gitWorktrees.diff.rootFolder", defaultValue: "Repository root")
+            : URL(fileURLWithPath: group.folder).lastPathComponent
+        let parentPath = group.folder.isEmpty
+            ? nil
+            : {
+                let parent = URL(fileURLWithPath: group.folder).deletingLastPathComponent()
+                let parentPath = parent.path
+                return parentPath == "." || parentPath == "/" ? nil : parentPath
+            }()
+        return Button {
+            if isCollapsed { collapsedFolders.remove(group.folder) }
+            else { collapsedFolders.insert(group.folder) }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 10)
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(folderName)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let parentPath {
+                        Text(parentPath)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 4)
+                Text(String(group.files.count))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+            .padding(.horizontal, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(folderName)
+        .accessibilityValue(isCollapsed ? String(localized: "gitWorktrees.diff.collapsed", defaultValue: "Collapsed") : String(localized: "gitWorktrees.diff.expanded", defaultValue: "Expanded"))
+    }
+
+    private func fileRow(_ file: GitDiffFileSnapshot) -> some View {
+        Button {
+            open(file: file)
+        } label: {
+            HStack(spacing: 6) {
+                Text(file.status.marker)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(file.status.color)
+                    .frame(width: 13)
+                Image(systemName: "doc.text")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(file.basename)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, minHeight: 23, alignment: .leading)
+            .padding(.leading, 25)
+            .padding(.trailing, 8)
+            .background(selectedFilePath == file.path ? Color.accentColor.opacity(0.18) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("GitDiff.file.\(file.path)")
+        .accessibilityLabel(file.path)
+        .help(file.path)
+    }
+
+    private var directoryDisplayName: String {
+        let name = URL(fileURLWithPath: directory).lastPathComponent
+        return name.isEmpty ? directory : name
+    }
+
+    private var groupedFiles: [(folder: String, files: [GitDiffFileSnapshot])] {
+        Dictionary(grouping: store.files) { file in
+            guard let slash = file.path.lastIndex(of: "/") else { return "" }
+            return String(file.path[..<slash])
+        }
+        .map { (folder: $0.key, files: $0.value.sorted { $0.path < $1.path }) }
+        .sorted { $0.folder.localizedStandardCompare($1.folder) == .orderedAscending }
+    }
+
+    private func open(file: GitDiffFileSnapshot) {
+        selectedFilePath = file.path
+        openError = nil
+        guard let workspaceId else {
+            openError = String(localized: "gitWorktrees.diff.openError.message", defaultValue: "The file diff could not be opened.")
+            return
+        }
+        Task {
+            let result = await GitDiffSnapshotStore.loadPatch(
+                at: directory,
+                relativePath: file.path,
+                status: file.status
+            )
+            guard case .success(let patch) = result, !patch.isEmpty else {
+                openError = result.failureMessage
+                return
+            }
+            guard AppDelegate.shared?.launchPatchDiffViewerProcess(
+                patch: patch,
+                cwd: directory,
+                workspaceId: workspaceId,
+                focus: true
+            ) == true else {
+                openError = String(localized: "gitWorktrees.diff.openError.message", defaultValue: "The file diff could not be opened.")
+                return
+            }
+        }
+    }
+}
+
+private extension Result where Success == String, Failure == NSError {
+    var failureMessage: String {
+        switch self {
+        case .success:
+            return String(localized: "gitWorktrees.diff.noPatch", defaultValue: "No diff is available for this file.")
+        case .failure(let error):
+            return error.localizedDescription
+        }
+    }
+}
+
+private struct GitDiffEmptyState: View {
+    let text: String
+    let symbol: String
+    var actionTitle: String?
+    var action: (() -> Void)?
+
+    init(text: String, symbol: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
+        self.text = text
+        self.symbol = symbol
+        self.actionTitle = actionTitle
+        self.action = action
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: symbol).font(.title2).foregroundStyle(.secondary)
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(20)
     }
 }

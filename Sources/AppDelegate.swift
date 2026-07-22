@@ -949,6 +949,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Live `cmux diff` viewer subprocesses, keyed by pid, retained until they exit.
     /// Declared outside `#if DEBUG` because process retention is production behavior.
     private var diffViewerProcesses: [Int32: Process] = [:]
+    /// Remembers the browser surface used for the last per-file patch diff, per
+    /// workspace, so subsequent file clicks reuse it instead of splitting again.
+    private var patchDiffViewerSurfaceByWorkspace: [UUID: UUID] = [:]
     /// In-flight agent-aware diff launches, keyed so repeated shortcuts do not fan out large baseline parses.
     var openDiffViewerAgentContextTasks: [String: Task<Void, Never>] = [:]
     var openDiffViewerAgentContextPendingRequests: [String: OpenDiffViewerAgentContextRequest] = [:]
@@ -6202,6 +6205,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #endif
             return false
         }
+    }
+
+    /// Opens a patch for one repository file in the central diff viewer.
+    /// The patch is materialized briefly because the `cmux diff` CLI accepts a
+    /// patch file and owns the viewer lifecycle.
+    @discardableResult
+    func launchPatchDiffViewerProcess(
+        patch: String,
+        cwd: String,
+        workspaceId: UUID,
+        focus: Bool = true
+    ) -> Bool {
+        guard !patch.isEmpty else { return false }
+        let fileManager = FileManager.default
+        let tempDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("cmux-file-diff-")
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let patchURL = tempDirectory.appendingPathComponent("change.patch")
+        do {
+            try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+            try patch.write(to: patchURL, atomically: true, encoding: .utf8)
+        } catch {
+            return false
+        }
+
+        let cliURL: URL
+        if let path = ProcessInfo.processInfo.environment["CMUX_BUNDLED_CLI_PATH"],
+           fileManager.isExecutableFile(atPath: path) {
+            cliURL = URL(fileURLWithPath: path)
+        } else if let resourceURL = Bundle.main.resourceURL {
+            cliURL = resourceURL.appendingPathComponent("bin/cmux", isDirectory: false)
+        } else {
+            try? fileManager.removeItem(at: tempDirectory)
+            return false
+        }
+        let socketPath = TerminalController.shared.activeSocketPath(
+            preferredPath: SocketControlSettings.socketPath()
+        )
+        let reuseSurfaceId = patchDiffViewerSurfaceByWorkspace[workspaceId]
+        let canReuse: Bool = {
+            guard let reuseSurfaceId else { return false }
+            return browserPanel(for: reuseSurfaceId) != nil
+        }()
+        if !canReuse {
+            patchDiffViewerSurfaceByWorkspace[workspaceId] = nil
+        }
+        let sourceSurfaceId = workspaceForMainActor(tabId: workspaceId)?.focusedPanelId
+        let process = Process()
+        process.executableURL = cliURL
+        var arguments = ["--socket", socketPath]
+        if !canReuse {
+            arguments.append("--json")
+            arguments.append("--id-format")
+            arguments.append("uuids")
+        }
+        arguments.append(contentsOf: [
+            "diff", patchURL.path,
+            "--cwd", cwd,
+            "--workspace", workspaceId.uuidString,
+        ])
+        if canReuse, let reuseSurfaceId {
+            arguments.append(contentsOf: ["--target-surface", reuseSurfaceId.uuidString])
+        } else if let sourceSurfaceId {
+            arguments.append(contentsOf: ["--surface", sourceSurfaceId.uuidString])
+        }
+        arguments.append(contentsOf: ["--focus", focus ? "true" : "false"])
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["CMUX_SOCKET_PATH"] = socketPath
+        environment["CMUX_BUNDLED_CLI_PATH"] = cliURL.path
+        environment["CMUX_WORKSPACE_ID"] = workspaceId.uuidString
+        environment.removeValue(forKey: "CMUX_SOCKET")
+        environment.removeValue(forKey: "CMUX_SURFACE_ID")
+        environment.removeValue(forKey: "CMUX_TAB_ID")
+        environment.removeValue(forKey: "CMUX_PANEL_ID")
+        process.environment = environment
+        // Read stdout concurrently to prevent pipe deadlock; stderr is
+        // discarded since we only need the JSON surface_id from stdout.
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = FileHandle.nullDevice
+        let stdoutReadTask = Task.detached(priority: .utility) {
+            stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+        let wasReusing = canReuse
+        process.terminationHandler = { [weak self] terminatedProcess in
+            try? fileManager.removeItem(at: tempDirectory)
+            let status = terminatedProcess.terminationStatus
+            let pid = terminatedProcess.processIdentifier
+            Task { @MainActor in
+                self?.diffViewerProcesses.removeValue(forKey: pid)
+                if wasReusing {
+                    if status != 0 {
+                        self?.patchDiffViewerSurfaceByWorkspace[workspaceId] = nil
+                        NSSound.beep()
+                    }
+                } else if status == 0 {
+                    let stdoutData = await stdoutReadTask.value
+                    let stdoutString = String(data: stdoutData, encoding: .utf8) ?? ""
+                    if let surfaceId = Self.patchDiffSurfaceId(from: stdoutString) {
+                        self?.patchDiffViewerSurfaceByWorkspace[workspaceId] = surfaceId
+                    }
+                } else {
+                    let stdoutData = await stdoutReadTask.value
+#if DEBUG
+                    cmuxDebugLog("openFileDiff split exited status=\(status) outputBytes=\(stdoutData.count)")
+#endif
+                    NSSound.beep()
+                }
+            }
+        }
+        do {
+            try process.run()
+            diffViewerProcesses[process.processIdentifier] = process
+            return true
+        } catch {
+            stdoutReadTask.cancel()
+            try? fileManager.removeItem(at: tempDirectory)
+            return false
+        }
+    }
+
+    private static func patchDiffSurfaceId(from output: String) -> UUID? {
+        guard let firstBrace = output.firstIndex(of: "{"),
+              let lastBrace = output.lastIndex(of: "}"),
+              firstBrace <= lastBrace else { return nil }
+        let jsonSlice = String(output[firstBrace...lastBrace])
+        guard let data = jsonSlice.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let surfaceIdString = object["surface_id"] as? String else { return nil }
+        return UUID(uuidString: surfaceIdString)
     }
 
     func allMainWindowTabManagersForDebug() -> [TabManager] {

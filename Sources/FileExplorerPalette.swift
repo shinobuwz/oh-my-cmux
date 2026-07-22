@@ -34,10 +34,10 @@ struct FileExplorerPalette {
         fileIconTint: neutralIcon,
         folderIconTint: neutralIcon,
         modifiedText: yellow,
-        addedText: green,
+        addedText: purple,
         deletedText: red,
         renamedText: blue,
-        untrackedText: neutral
+        untrackedText: green
     )
 
     static let terminalStealth = FileExplorerPalette(
