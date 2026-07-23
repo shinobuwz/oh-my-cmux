@@ -47,4 +47,35 @@ import Testing
             "Expected new terminal tab to inherit the selected source terminal's requested cwd when no reported cwd exists yet"
         )
     }
+    @Test func replacementTerminalUsesBoundWorkspaceRoot() {
+        let workspace = Workspace()
+        let staleSelectedTerminalDirectory = "/tmp/cmux-last-selected-cwd-\(UUID().uuidString)"
+        let boundRoot = "/tmp/cmux-bound-root-\(UUID().uuidString)"
+        workspace.currentDirectory = staleSelectedTerminalDirectory
+        workspace.boundRootPath = boundRoot
+
+        let replacement = workspace.createReplacementTerminalPanel()
+
+        #expect(
+            replacement.requestedWorkingDirectory == boundRoot,
+            "Expected a replacement terminal to start at its second-level workspace root instead of the last selected terminal cwd"
+        )
+    }
+
+    @Test func newWorkspaceContainerStartsCollapsedAndSelectionPreservesIt() throws {
+        let suiteName = "cmux.workspace-collapse-tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let manager = TabManager(
+            initialWorkingDirectory: "/tmp/cmux-container-root",
+            autoWelcomeIfNeeded: false,
+            settings: UserDefaultsSettingsClient(defaults: defaults),
+            closeTabWarningDefaults: defaults
+        )
+        let workspace = try #require(manager.tabs.first)
+
+        #expect(manager.workspaceContainers.first?.isCollapsed == true)
+        manager.selectWorkspace(workspace)
+        #expect(manager.workspaceContainers.first?.isCollapsed == true)
+    }
 }
