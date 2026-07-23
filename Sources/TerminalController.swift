@@ -1288,6 +1288,8 @@ class TerminalController {
             return v2Result(id: request.id, v2SurfaceReadText(params: request.params))
         case "workspace.env":
             return v2Result(id: request.id, v2WorkspaceEnv(params: request.params))
+        case "workspace.new_worktree":
+            return v2Result(id: request.id, v2WorkspaceNewWorktree(params: request.params))
         case "workspace.remote.pty_sessions":
             return v2Result(id: request.id, v2WorkspaceRemotePTYSessions(params: request.params))
         case "workspace.remote.pty_close":

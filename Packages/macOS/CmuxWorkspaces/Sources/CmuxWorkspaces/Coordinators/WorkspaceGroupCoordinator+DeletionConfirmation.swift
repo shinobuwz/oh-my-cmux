@@ -3,27 +3,24 @@ public import Foundation
 extension WorkspaceGroupCoordinator {
     /// Resolves the live confirmation snapshot for deleting a workspace group.
     ///
-    /// Membership is read from the authoritative `WorkspaceTabRepresenting.groupId`
-    /// values at action time, so stale sidebar render snapshots cannot drive the
-    /// destructive confirmation copy or delete follow-through.
+    /// Membership is read from the current container and leaf records at
+    /// action time, so stale sidebar render snapshots cannot drive the
+    /// destructive confirmation copy or delete follow-through. A group is
+    /// deletable only when empty: the returned snapshot's `isEmpty` reflects
+    /// whether there are containers under the group.
     /// - Parameter groupId: The group being considered for deletion.
-    /// - Returns: The current confirmation snapshot, or `nil` if the group no longer exists.
+    /// - Returns: The current confirmation snapshot, or `nil` if the group no
+    ///   longer exists.
     public func deletionConfirmation(groupId: UUID) -> WorkspaceGroupDeletionConfirmation? {
         guard let group = model.workspaceGroups.first(where: { $0.id == groupId }) else {
             return nil
         }
-        let includesAnchorWorkspace = model.tabs.contains { $0.id == group.anchorWorkspaceId }
-        var memberWorkspaceIds = includesAnchorWorkspace ? [group.anchorWorkspaceId] : []
-        memberWorkspaceIds.append(
-            contentsOf: model.tabs.compactMap { tab in
-                tab.groupId == groupId && tab.id != group.anchorWorkspaceId ? tab.id : nil
-            }
-        )
+        let containerIds = model.containers(inGroup: groupId).map(\.id)
+        let memberWorkspaceIds = model.leaves(inGroup: groupId).map(\.id)
         return WorkspaceGroupDeletionConfirmation(
             groupId: group.id,
             groupName: group.name,
-            anchorWorkspaceId: group.anchorWorkspaceId,
-            includesAnchorWorkspace: includesAnchorWorkspace,
+            containerIds: containerIds,
             memberWorkspaceIds: memberWorkspaceIds
         )
     }
@@ -32,84 +29,51 @@ extension WorkspaceGroupCoordinator {
     ///
     /// The sidebar header row can briefly outlive the backing group record
     /// while SwiftUI drains an old list snapshot. From the user's perspective
-    /// the folder is still on screen and its Delete Group menu item must delete
-    /// that visible header workspace instead of no-oping on the stale group id.
+    /// the folder is still on screen and its Delete Group menu item must act
+    /// on that visible header instead of no-oping on the stale group id.
     public func deletionConfirmation(
         groupId: UUID,
-        fallbackGroupName: String,
-        fallbackAnchorWorkspaceId: UUID
+        fallbackGroupName: String
     ) -> WorkspaceGroupDeletionConfirmation? {
         if let confirmation = deletionConfirmation(groupId: groupId) {
             return confirmation
         }
-        guard model.tabs.contains(where: { $0.id == fallbackAnchorWorkspaceId }) else {
-            return nil
-        }
+        // Group record already gone: synthesize an empty confirmation so the
+        // app's confirmation UI no-ops cleanly rather than crashing on a nil
+        // unwrap. There is nothing left to delete.
         return WorkspaceGroupDeletionConfirmation(
             groupId: groupId,
             groupName: fallbackGroupName,
-            anchorWorkspaceId: fallbackAnchorWorkspaceId,
-            includesAnchorWorkspace: true,
-            memberWorkspaceIds: [fallbackAnchorWorkspaceId]
+            containerIds: [],
+            memberWorkspaceIds: []
         )
     }
 
     /// Deletes a group using the exact membership the user confirmed.
     ///
-    /// Confirmation sheets run a nested modal loop, so other entrypoints can
-    /// still mutate group membership before the user clicks the destructive
-    /// button. This method closes only the workspaces present in the confirmed
-    /// snapshot, then removes the group and detaches any later joiners instead
-    /// of closing workspaces the dialog never showed.
+    /// **Non-empty groups are rejected** (`false`): a group with containers has
+    /// leaves that would be destroyed, and the normalized model requires
+    /// containers to be removed individually (closing their leaves) before the
+    /// group is deleted. Confirmation sheets run a nested modal loop, so other
+    /// entrypoints can mutate the group before the user clicks the destructive
+    /// button; this method re-checks emptiness against the live model.
     @discardableResult
     public func deleteWorkspaceGroup(
-        confirmed confirmation: WorkspaceGroupDeletionConfirmation,
-        recordHistory: Bool = true
-    ) -> Int {
-        guard let host else { return 0 }
-        guard model.workspaceGroups.contains(where: { $0.id == confirmation.groupId })
-            || model.tabs.contains(where: { $0.id == confirmation.anchorWorkspaceId }) else {
-            return 0
+        confirmed confirmation: WorkspaceGroupDeletionConfirmation
+    ) -> Bool {
+        guard model.workspaceGroups.contains(where: { $0.id == confirmation.groupId }) else {
+            return false
         }
-
-        let confirmedWorkspaceIds = Set(confirmation.memberWorkspaceIds)
-        let confirmedOrder = Dictionary(
-            uniqueKeysWithValues: confirmation.memberWorkspaceIds.enumerated().map { ($1, $0) }
-        )
-        var members = model.tabs.filter { confirmedWorkspaceIds.contains($0.id) }
-        members.sort { lhs, rhs in
-            if lhs.id == confirmation.anchorWorkspaceId { return false }
-            if rhs.id == confirmation.anchorWorkspaceId { return true }
-            return confirmedOrder[lhs.id, default: Int.max] < confirmedOrder[rhs.id, default: Int.max]
-        }
-        let affectedWorkspaceIds = confirmation.memberWorkspaceIds.isEmpty
-            ? model.tabs.contains(where: { $0.id == confirmation.anchorWorkspaceId }) ? [confirmation.anchorWorkspaceId] : []
-            : confirmation.memberWorkspaceIds
-
-        var closed = 0
-        for tab in members {
-            if model.tabs.count <= 1 {
-                _ = host.createWorkspaceForGroup(
-                    title: nil,
-                    workingDirectory: nil,
-                    initialSurface: .terminal,
-                    initialBrowserURL: nil,
-                    initialBrowserOmnibarVisible: false,
-                    initialBrowserTransparentBackground: false,
-                    inheritWorkingDirectory: true,
-                    select: true
-                )
-            }
-            let countBefore = model.tabs.count
-            host.closeWorkspaceForGroupDeletion(tab, recordHistory: recordHistory)
-            if model.tabs.count < countBefore { closed += 1 }
-        }
-
-        for tab in model.tabs where tab.groupId == confirmation.groupId {
-            model.assignGroup(workspaceId: tab.id, groupId: nil)
+        // Re-check live membership: any container or leaf under the group makes
+        // the deletion unsafe. The user must empty the group first.
+        let liveContainerIds = model.containers(inGroup: confirmation.groupId).map(\.id)
+        let liveMemberIds = model.leaves(inGroup: confirmation.groupId).map(\.id)
+        guard liveContainerIds.isEmpty && liveMemberIds.isEmpty else {
+            return false
         }
         model.workspaceGroups.removeAll { $0.id == confirmation.groupId }
-        host.workspaceOrderDidChange(movedWorkspaceIds: affectedWorkspaceIds)
-        return closed
+        model.normalizeWorkspaceNesting()
+        host?.workspaceOrderDidChange(movedWorkspaceIds: [])
+        return true
     }
 }

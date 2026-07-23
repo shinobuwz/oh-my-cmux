@@ -6,7 +6,7 @@ import CmuxSettings
 @MainActor
 final class CoordinatorStubTab: WorkspaceTabRepresenting {
     let id: UUID
-    var groupId: UUID?
+    var workspaceContainerId: UUID?
     var isPinned: Bool
     var currentDirectory: String
 
@@ -16,7 +16,7 @@ final class CoordinatorStubTab: WorkspaceTabRepresenting {
         currentDirectory: String = "/tmp"
     ) {
         self.id = UUID()
-        self.groupId = groupId
+        self.workspaceContainerId = groupId
         self.isPinned = isPinned
         self.currentDirectory = currentDirectory
     }
@@ -233,7 +233,7 @@ struct WorkspaceCoordinatorTests {
             explicitGroupId: groupId
         )
         #expect(moved)
-        #expect(dragged.groupId == groupId)
+        #expect(dragged.workspaceContainerId == groupId)
         #expect(model.tabs.map(\.id) == [
             group.anchorWorkspaceId,
             child1.id,
@@ -265,7 +265,7 @@ struct WorkspaceCoordinatorTests {
             explicitGroupId: groupId
         )
         #expect(moved)
-        #expect(dragged.groupId == groupId)
+        #expect(dragged.workspaceContainerId == groupId)
     }
 
     @Test
@@ -290,7 +290,7 @@ struct WorkspaceCoordinatorTests {
             explicitGroupId: groupId
         )
         #expect(moved)
-        #expect(dragged.groupId == groupId)
+        #expect(dragged.workspaceContainerId == groupId)
         #expect(model.selectedTabId == dragged.id)
         #expect(model.workspaceGroups.first { $0.id == groupId }?.isCollapsed == false)
     }
@@ -318,7 +318,7 @@ struct WorkspaceCoordinatorTests {
             explicitGroupId: UUID()
         )
         #expect(!moved)
-        #expect(dragged.groupId == nil)
+        #expect(dragged.workspaceContainerId == nil)
         #expect(model.tabs.map(\.id) == previousOrder)
     }
 
@@ -341,7 +341,7 @@ struct WorkspaceCoordinatorTests {
             targetChild2.id,
         ]))
         let targetGroup = try #require(model.workspaceGroups.first { $0.id == targetGroupId })
-        let targetLastIndex = try #require(model.tabs.indices.last { model.tabs[$0].groupId == targetGroupId })
+        let targetLastIndex = try #require(model.tabs.indices.last { model.tabs[$0].workspaceContainerId == targetGroupId })
 
         let moved = reorder.reorderSidebarWorkspace(
             tabId: dragged.id,
@@ -350,8 +350,8 @@ struct WorkspaceCoordinatorTests {
             explicitGroupId: targetGroupId
         )
         #expect(moved)
-        #expect(dragged.groupId == targetGroupId)
-        #expect(model.tabs.filter { $0.groupId == targetGroupId }.map(\.id) == [
+        #expect(dragged.workspaceContainerId == targetGroupId)
+        #expect(model.tabs.filter { $0.workspaceContainerId == targetGroupId }.map(\.id) == [
             targetGroup.anchorWorkspaceId,
             targetChild1.id,
             targetChild2.id,
@@ -380,7 +380,7 @@ struct WorkspaceCoordinatorTests {
             isDragOperation: true
         )
         #expect(moved)
-        #expect(dragged.groupId == nil)
+        #expect(dragged.workspaceContainerId == nil)
         #expect(model.tabs.map(\.id) == [
             group.anchorWorkspaceId,
             child1.id,
@@ -412,7 +412,7 @@ struct WorkspaceCoordinatorTests {
             usesTopLevelRows: true
         )
         #expect(moved)
-        #expect(dragged.groupId == nil)
+        #expect(dragged.workspaceContainerId == nil)
         #expect(model.tabs.map(\.id) == [
             group.anchorWorkspaceId,
             child1.id,
@@ -435,7 +435,7 @@ struct WorkspaceCoordinatorTests {
             child1.id,
             child2.id,
         ]))
-        let memberIndices = model.tabs.indices.filter { model.tabs[$0].groupId == groupId }
+        let memberIndices = model.tabs.indices.filter { model.tabs[$0].workspaceContainerId == groupId }
         let firstMemberIndex = try #require(memberIndices.first)
         let lastMemberIndex = try #require(memberIndices.last)
 
@@ -470,8 +470,8 @@ struct WorkspaceCoordinatorTests {
         let group = try #require(model.workspaceGroups.first(where: { $0.id == groupId }))
         #expect(group.name == "Group 1")
         let anchorId = group.anchorWorkspaceId
-        #expect(model.tabs.first(where: { $0.id == child1.id })?.groupId == groupId)
-        #expect(model.tabs.first(where: { $0.id == child2.id })?.groupId == groupId)
+        #expect(model.tabs.first(where: { $0.id == child1.id })?.workspaceContainerId == groupId)
+        #expect(model.tabs.first(where: { $0.id == child2.id })?.workspaceContainerId == groupId)
         // Section is contiguous and anchor-first at the first child's slot.
         #expect(model.tabs.map(\.id) == [anchorId, child1.id, child2.id, other.id])
         #expect(host.orderChanges.last == [anchorId, child1.id, child2.id])
@@ -489,7 +489,7 @@ struct WorkspaceCoordinatorTests {
         _ = groups.createWorkspaceGroup(name: "Two", childWorkspaceIds: [firstAnchor])
 
         // The foreign anchor keeps its original membership.
-        #expect(model.tabs.first(where: { $0.id == firstAnchor })?.groupId == firstGroupId)
+        #expect(model.tabs.first(where: { $0.id == firstAnchor })?.workspaceContainerId == firstGroupId)
     }
 
     @Test
@@ -508,7 +508,7 @@ struct WorkspaceCoordinatorTests {
         #expect(host.closedWorkspaceIds.count >= 3)
         #expect(model.workspaceGroups.isEmpty)
         #expect(model.tabs.count == 1)
-        #expect(model.tabs[0].groupId == nil)
+        #expect(model.tabs[0].workspaceContainerId == nil)
     }
 
     @Test
@@ -523,7 +523,7 @@ struct WorkspaceCoordinatorTests {
         groups.ungroupWorkspaceGroup(groupId: groupId)
         #expect(model.workspaceGroups.isEmpty)
         #expect(model.tabs.map(\.id) == orderBefore)
-        #expect(model.tabs.allSatisfy { $0.groupId == nil })
+        #expect(model.tabs.allSatisfy { $0.workspaceContainerId == nil })
     }
 
     @Test
@@ -558,7 +558,7 @@ struct WorkspaceCoordinatorTests {
         }
         model.dissolveGroupsAnchoredBy(closedWorkspaceId: anchorId)
         #expect(model.workspaceGroups.isEmpty)
-        #expect(model.tabs.allSatisfy { $0.groupId == nil })
+        #expect(model.tabs.allSatisfy { $0.workspaceContainerId == nil })
     }
 
     @Test
@@ -572,7 +572,7 @@ struct WorkspaceCoordinatorTests {
 
         groups.setWorkspaceGroupAnchor(groupId: groupId, workspaceId: b.id)
         #expect(model.workspaceGroups[0].anchorWorkspaceId == b.id)
-        let memberIds = model.tabs.filter { $0.groupId == groupId }.map(\.id)
+        let memberIds = model.tabs.filter { $0.workspaceContainerId == groupId }.map(\.id)
         #expect(memberIds.first == b.id)
     }
 }

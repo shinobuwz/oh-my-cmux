@@ -49,6 +49,13 @@ extension ControlCommandCoordinator {
         ) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
         }
+        if closedCount == -2 {
+            return .err(
+                code: "invalid_state",
+                message: workspaceGroupStrings().nonEmptyGroupCannotBeDeleted,
+                data: .object(["group_id": .string(groupID.uuidString)])
+            )
+        }
         guard closedCount >= 0 else {
             return .err(code: "not_found", message: "Group not found", data: .object([
                 "group_id": .string(groupID.uuidString),

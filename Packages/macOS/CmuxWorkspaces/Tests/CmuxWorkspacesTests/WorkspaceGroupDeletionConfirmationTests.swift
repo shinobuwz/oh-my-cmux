@@ -25,10 +25,10 @@ struct WorkspaceGroupDeletionConfirmationTests {
         let groupId = try #require(groups.createWorkspaceGroup(name: "G", childWorkspaceIds: [first.id, second.id]))
         let group = try #require(model.workspaceGroups.first { $0.id == groupId })
         let anchorId = group.anchorWorkspaceId
-        let staleMemberCount = model.tabs.filter { $0.groupId == groupId }.count
+        let staleMemberCount = model.tabs.filter { $0.workspaceContainerId == groupId }.count
         #expect(staleMemberCount > 1)
 
-        let memberIds = model.tabs.compactMap { $0.groupId == groupId ? $0.id : nil }
+        let memberIds = model.tabs.compactMap { $0.workspaceContainerId == groupId ? $0.id : nil }
         for id in memberIds {
             model.assignGroup(workspaceId: id, groupId: nil)
         }
@@ -85,8 +85,8 @@ struct WorkspaceGroupDeletionConfirmationTests {
 
         #expect(closed == 1)
         #expect(host.closedWorkspaceIds == [anchorId])
-        #expect(model.tabs.contains { $0.id == first.id && $0.groupId == nil })
-        #expect(model.tabs.contains { $0.id == second.id && $0.groupId == nil })
+        #expect(model.tabs.contains { $0.id == first.id && $0.workspaceContainerId == nil })
+        #expect(model.tabs.contains { $0.id == second.id && $0.workspaceContainerId == nil })
         #expect(!model.workspaceGroups.contains { $0.id == groupId })
     }
 
@@ -107,7 +107,7 @@ struct WorkspaceGroupDeletionConfirmationTests {
         #expect(host.closedWorkspaceIds == [anchorId])
         #expect(!model.tabs.contains { $0.id == anchorId })
         #expect(model.tabs.count == 1)
-        #expect(model.tabs[0].groupId == nil)
+        #expect(model.tabs[0].workspaceContainerId == nil)
         #expect(!model.workspaceGroups.contains { $0.id == groupId })
     }
 
@@ -151,7 +151,7 @@ struct WorkspaceGroupDeletionConfirmationTests {
         #expect(confirmation.containedWorkspaceCount == 2)
 
         model.assignGroup(workspaceId: lateJoiner.id, groupId: groupId)
-        let liveMembershipAfterPrompt = Set(model.tabs.filter { $0.groupId == groupId }.map(\.id))
+        let liveMembershipAfterPrompt = Set(model.tabs.filter { $0.workspaceContainerId == groupId }.map(\.id))
         #expect(liveMembershipAfterPrompt.contains(lateJoiner.id))
 
         let closed = groups.deleteWorkspaceGroup(confirmed: confirmation)
@@ -160,7 +160,7 @@ struct WorkspaceGroupDeletionConfirmationTests {
         #expect(Set(host.closedWorkspaceIds) == Set(confirmation.memberWorkspaceIds))
         #expect(host.closedWorkspaceIds.last == confirmation.anchorWorkspaceId)
         #expect(model.tabs.contains { $0.id == lateJoiner.id })
-        #expect(model.tabs.first(where: { $0.id == lateJoiner.id })?.groupId == nil)
+        #expect(model.tabs.first(where: { $0.id == lateJoiner.id })?.workspaceContainerId == nil)
         #expect(!model.workspaceGroups.contains { $0.id == groupId })
     }
 }

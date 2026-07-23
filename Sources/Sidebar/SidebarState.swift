@@ -90,7 +90,6 @@ enum SidebarSelectedWorkspaceScrollPolicy {
         selectedWorkspaceId: UUID,
         group: WorkspaceGroup?
     ) -> UUID {
-        guard let group, group.isCollapsed else { return selectedWorkspaceId }
-        return group.anchorWorkspaceId
+        group?.lastActiveWorkspaceId ?? selectedWorkspaceId
     }
 }

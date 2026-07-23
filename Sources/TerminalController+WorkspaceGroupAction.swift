@@ -11,11 +11,7 @@ extension TerminalController {
 
         var mutationError: V2CallResult?
         v2MainSync {
-            guard tabManager.createWorkspaceGroup(
-                name: name,
-                selectAnchor: false,
-                collapseSidebarSelection: false
-            ) != nil else {
+            guard tabManager.createWorkspaceGroup(name: name) != nil else {
                 mutationError = .err(code: "not_created", message: "Group was not created", data: nil)
                 return
             }
@@ -71,38 +67,22 @@ extension TerminalController {
                 }
                 tabManager.renameWorkspaceGroup(groupId: groupID, name: title)
             case .ungroup:
-                tabManager.ungroupWorkspaceGroup(groupId: groupID)
-            case .delete:
-                let memberCount = tabManager.tabs.filter { $0.groupId == groupID }.count
-                guard memberCount > 0 else {
+                let containerCount = tabManager.workspaceContainers.lazy.filter { $0.groupId == groupID }.count
+                guard containerCount == 0, tabManager.deleteWorkspaceGroup(groupId: groupID) else {
                     mutationError = .err(
                         code: "invalid_request",
-                        message: "Group has no workspaces to close",
+                        message: String(localized: "mobile.workspaceGroup.error.onlyEmptyRemove", defaultValue: "Only an empty group can be removed on mobile"),
                         data: ["group_id": groupID.uuidString]
                     )
                     return
                 }
-                guard memberCount < tabManager.tabs.count else {
+            case .delete:
+                let containerCount = tabManager.workspaceContainers.lazy.filter { $0.groupId == groupID }.count
+                guard containerCount == 0, tabManager.deleteWorkspaceGroup(groupId: groupID) else {
                     mutationError = .err(
                         code: "invalid_request",
-                        message: "Cannot delete every workspace in a window",
-                        data: [
-                            "group_id": groupID.uuidString,
-                            "workspace_count": memberCount,
-                        ]
-                    )
-                    return
-                }
-                let closed = tabManager.deleteWorkspaceGroup(groupId: groupID)
-                guard closed == memberCount else {
-                    mutationError = .err(
-                        code: "invalid_request",
-                        message: "Could not close every workspace in the group",
-                        data: [
-                            "group_id": groupID.uuidString,
-                            "requested_close_count": memberCount,
-                            "closed_count": closed,
-                        ]
+                        message: String(localized: "workspaceGroup.error.nonEmptyDelete", defaultValue: "A non-empty group cannot be deleted"),
+                        data: ["group_id": groupID.uuidString]
                     )
                     return
                 }

@@ -119,16 +119,20 @@ final class MobileStateSyncHost {
                         name: group.name,
                         isCollapsed: group.isCollapsed,
                         isPinned: group.isPinned,
-                        anchorWorkspaceID: group.anchorWorkspaceId.uuidString,
+                        anchorWorkspaceID: group.lastActiveWorkspaceId?.uuidString ?? "",
                         sortIndex: groupRows.count
                     )
                 )
             }
+            let groupIDByContainerID = Dictionary(
+                uniqueKeysWithValues: windowTabManager.workspaceContainers.map { ($0.id, $0.groupId) }
+            )
             for workspace in windowTabManager.tabs where seenWorkspaceIDs.insert(workspace.id).inserted {
                 liveWorkspaceIDs.insert(workspace.id)
                 workspaceRows.append(
                     workspaceRow(
                         workspace: workspace,
+                        groupID: workspace.workspaceContainerId.flatMap { groupIDByContainerID[$0] },
                         windowID: summary.windowId,
                         isSelected: workspace.id == selectedWorkspaceID,
                         sortIndex: workspaceRows.count,
@@ -144,6 +148,7 @@ final class MobileStateSyncHost {
 
     private func workspaceRow(
         workspace: Workspace,
+        groupID: UUID?,
         windowID: UUID,
         isSelected: Bool,
         sortIndex: Int,
@@ -173,7 +178,7 @@ final class MobileStateSyncHost {
             currentDirectory: workspace.presentedCurrentDirectory,
             isSelected: isSelected,
             isPinned: workspace.isPinned,
-            groupID: workspace.groupId?.uuidString,
+            groupID: groupID?.uuidString,
             preview: preview?.text,
             previewAt: preview?.epochSeconds,
             lastActivityAt: (latestNotification?.createdAt ?? workspace.createdAt).timeIntervalSince1970,

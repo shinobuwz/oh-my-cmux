@@ -26,18 +26,10 @@ extension TabManager {
         targetWindow.title = title
     }
 
-    /// The name to display for `tab` across window chrome — the custom title
-    /// bar, `NSWindow.title`, and the toolbar command label.
-    ///
-    /// A workspace group's anchor is represented everywhere by the group itself
-    /// (the sidebar draws only the group header, never a separate anchor row,
-    /// per `SidebarWorkspaceRenderItem`), so for an anchor the single source of
-    /// truth for the displayed name is the group's `name`. The anchor's own
-    /// `title` is merely seeded equal to the group name at creation and would
-    /// otherwise drift when the group is renamed.
+    /// The leaf name displayed in window chrome. Group and workspace-container
+    /// names are structural sidebar labels and never replace the active leaf.
     func resolvedWorkspaceDisplayTitle(for tab: Workspace) -> String {
-        let anchorGroupName = workspaces.groupNamesByAnchorWorkspaceId[tab.id]
-        return resolvedWorkspaceDisplayTitle(for: tab, anchorGroupName: anchorGroupName)
+        tab.title
     }
 
     func resolvedWorkspaceDisplayTitle(forWorkspaceId workspaceId: UUID) -> String? {
@@ -47,22 +39,15 @@ extension TabManager {
 
     func resolvedWorkspaceDisplayTitles(for workspaceIds: Set<UUID>) -> [UUID: String] {
         guard !workspaceIds.isEmpty else { return [:] }
-        let groupNamesByAnchorId = workspaces.groupNamesByAnchorWorkspaceId
         var titles: [UUID: String] = [:]
         titles.reserveCapacity(workspaceIds.count)
         for workspaceId in workspaceIds {
             guard let workspace = workspacesById[workspaceId] else { continue }
-            titles[workspaceId] = resolvedWorkspaceDisplayTitle(
-                for: workspace,
-                anchorGroupName: groupNamesByAnchorId[workspaceId]
-            )
+            titles[workspaceId] = workspace.title
         }
         return titles
     }
 
-    private func resolvedWorkspaceDisplayTitle(for workspace: Workspace, anchorGroupName: String?) -> String {
-        anchorGroupName ?? workspace.title
-    }
 
     private func windowTitle(for tab: Workspace?) -> String {
         let defaultTitle = defaultWindowTitle(for: tab)

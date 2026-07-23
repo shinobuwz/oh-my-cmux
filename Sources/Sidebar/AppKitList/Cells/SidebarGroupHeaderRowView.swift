@@ -156,24 +156,18 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
             ofSize: GlobalFontMagnification.scaledSize(metrics.nameFontSize, percent: percent),
             weight: .semibold
         )
-        nameField.textColor = model.isAnchorActive ? .labelColor : NSColor.labelColor.withAlphaComponent(0.9)
+        nameField.textColor = (model.isActive || model.hasActiveDescendant) ? .labelColor : NSColor.labelColor.withAlphaComponent(0.9)
 
-        let showsBadge = model.anchorUnreadCount > 0
+        let showsBadge = model.unreadCount > 0
         unreadBadgeView.isHidden = !showsBadge
         if showsBadge {
             unreadBadgeFont = .systemFont(
                 ofSize: GlobalFontMagnification.scaledSize(metrics.unreadFontSize, percent: percent),
                 weight: .semibold
             )
-            unreadBadgeView.configure(
-                count: model.anchorUnreadCount,
-                fillColor: .controlAccentColor,
-                textColor: .white,
-                font: unreadBadgeFont
-            )
+            unreadBadgeView.configure(count: model.unreadCount, fillColor: .controlAccentColor, textColor: .white, font: unreadBadgeFont)
             unreadBadgeView.setAccessibilityLabel(String.localizedStringWithFormat(
-                String(localized: "workspaceGroup.unread.a11y", defaultValue: "%lld unread"),
-                model.anchorUnreadCount
+                String(localized: "workspaceGroup.unread.a11y", defaultValue: "%lld unread"), model.unreadCount
             ))
         }
 
@@ -188,7 +182,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
             defaultValue: "New workspace in group"
         ))
 
-        backgroundView.layer?.backgroundColor = model.isAnchorActive
+        backgroundView.layer?.backgroundColor = (model.isActive || model.hasActiveDescendant)
             ? NSColor.labelColor.withAlphaComponent(0.08).cgColor
             : NSColor.clear.cgColor
 
@@ -200,7 +194,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
         hintPill.configure(
             text: model.shortcutHintText,
             fontSize: GlobalFontMagnification.scaledSize(10, percent: percent),
-            emphasis: model.isAnchorActive ? 1.0 : 0.9
+            emphasis: (model.isActive || model.hasActiveDescendant) ? 1.0 : 0.9
         )
 
         alphaValue = model.isBeingDragged ? 0.6 : 1
@@ -211,12 +205,11 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
 
     private func updatePlusVisibility() {
         let showsHint = model?.shortcutHintText != nil
-        plusButton.setRevealed(isPointerHovering && !contextMenuVisible && !showsHint)
+        let active = model?.isActive == true || model?.hasActiveDescendant == true
+        plusButton.setRevealed((isPointerHovering || active) && !contextMenuVisible && !showsHint)
     }
 
-    /// Authoritative hover enforcement: the controller sweeps visible cells
-    /// so hover-revealed chrome cannot strand on rows the pointer left
-    /// (row-index/id races during churn made per-transition repaints miss).
+    /// Authoritative hover enforcement for recycled cells.
     func enforcePointerHovering(_ hovering: Bool) {
         guard isPointerHovering != hovering else { return }
         isPointerHovering = hovering
@@ -227,7 +220,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
     /// instantly (group clicks focus the anchor workspace); the next
     /// authoritative configure reconciles.
     func showOptimisticAnchorActive() {
-        guard let model, !model.isAnchorActive else { return }
+        guard let model, !model.isActive else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         backgroundView.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
@@ -241,7 +234,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
     /// preview never changes this header's model — without an explicit clear
     /// the painted treatment would linger indefinitely.
     func clearOptimisticAnchorActive() {
-        guard let model, !model.isAnchorActive else { return }
+        guard let model, !model.isActive else { return }
         applyModel(model)
     }
 
@@ -302,7 +295,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
 
         var badgeSize = NSSize.zero
         if !unreadBadgeView.isHidden {
-            let textSize = NSString(string: "\(model.anchorUnreadCount)")
+            let textSize = NSString(string: "\(model.unreadCount)")
                 .size(withAttributes: [.font: unreadBadgeFont])
             badgeSize = NSSize(
                 width: ceil(textSize.width) + metrics.unreadHorizontalPadding * 2,
@@ -375,7 +368,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
             height: bounds.height
         )
         if innerRect.contains(point) {
-            actions?.onFocusAnchor()
+            actions?.onSelect()
         }
     }
 
@@ -500,11 +493,8 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
         appendConfigAndDocsItems(to: menu)
         menu.addItem(.separator())
         menu.addItem(menuItem(
-            String(localized: "workspaceGroup.contextMenu.ungroup", defaultValue: "Ungroup Workspaces"),
-            action: actions.onUngroup
-        ))
-        menu.addItem(menuItem(
             String(localized: "workspaceGroup.contextMenu.delete", defaultValue: "Delete Group"),
+            enabled: model.memberCount == 0,
             action: actions.onDelete
         ))
         return menu

@@ -29,6 +29,10 @@ extension TerminalController: ControlWorkspaceGroupContext {
             closeWorkspacesMustBeBoolean: String(
                 localized: "workspaceGroup.error.closeWorkspacesMustBeBoolean",
                 defaultValue: "close_workspaces must be a boolean"
+            ),
+            nonEmptyGroupCannotBeDeleted: String(
+                localized: "workspaceGroup.error.nonEmptyDelete",
+                defaultValue: "A non-empty group cannot be deleted"
             )
         )
     }
@@ -40,13 +44,22 @@ extension TerminalController: ControlWorkspaceGroupContext {
         _ group: WorkspaceGroup,
         tabManager: TabManager
     ) -> ControlWorkspaceGroupSnapshot {
-        let memberIds = tabManager.tabs.compactMap { $0.groupId == group.id ? $0.id : nil }
+        let containerIDs = Set(
+            tabManager.workspaceContainers
+                .filter { $0.groupId == group.id }
+                .map(\.id)
+        )
+        let memberIds: [UUID] = tabManager.tabs.compactMap {
+            guard let containerID = $0.workspaceContainerId,
+                  containerIDs.contains(containerID) else { return nil }
+            return $0.id
+        }
         return ControlWorkspaceGroupSnapshot(
             id: group.id,
             name: group.name,
             isCollapsed: group.isCollapsed,
             isPinned: group.isPinned,
-            anchorWorkspaceID: group.anchorWorkspaceId,
+            lastActiveWorkspaceID: group.lastActiveWorkspaceId,
             customColor: group.customColor,
             iconSymbol: group.iconSymbol,
             memberWorkspaceIDs: memberIds
@@ -75,38 +88,30 @@ extension TerminalController: ControlWorkspaceGroupContext {
         guard let tabManager = resolveTabManager(routing: routing) else {
             return .tabManagerUnavailable
         }
-
-        // A syntactically valid UUID can still reference a workspace that doesn't
-        // exist in this TabManager. Surface those instead of silently dropping
-        // them into an anchor-only group.
         let knownTabIds = Set(tabManager.tabs.map(\.id))
-        let missing: [String] = childWorkspaceIDs.compactMap { id in
-            knownTabIds.contains(id) ? nil : id.uuidString
-        }
-        if !missing.isEmpty {
-            return .childWorkspaceNotFound(missing)
-        }
-        if !childWorkspaceIDs.isEmpty {
-            let existingAnchorIds = Set(tabManager.workspaceGroups.map(\.anchorWorkspaceId))
-            let ineligible: [String] = childWorkspaceIDs.compactMap { id in
-                existingAnchorIds.contains(id) ? id.uuidString : nil
-            }
-            if ineligible.count == childWorkspaceIDs.count {
-                return .allChildrenAreAnchors(ineligible)
-            }
-        }
+        let missing = childWorkspaceIDs.compactMap { knownTabIds.contains($0) ? nil : $0.uuidString }
+        guard missing.isEmpty else { return .childWorkspaceNotFound(missing) }
+        guard let groupID = tabManager.createWorkspaceGroup(name: name) else { return .notCreated }
 
-        // workspace.group.create is NOT a focus-intent method; do not change the
-        // user's active workspace.
-        let createdGroupId = tabManager.createWorkspaceGroup(
-            name: name,
-            childWorkspaceIds: childWorkspaceIDs,
-            anchorWorkingDirectory: cwd,
-            selectAnchor: false,
-            collapseSidebarSelection: false
-        )
-        guard let gid = createdGroupId,
-              let group = tabManager.workspaceGroups.first(where: { $0.id == gid }) else {
+        var movedContainerIDs = Set<UUID>()
+        for workspaceID in childWorkspaceIDs {
+            guard let containerID = tabManager.tabs.first(where: { $0.id == workspaceID })?.workspaceContainerId,
+                  movedContainerIDs.insert(containerID).inserted else { continue }
+            let targetIndex = tabManager.workspaceContainers.filter { $0.groupId == groupID }.count
+            tabManager.moveWorkspaceContainer(containerId: containerID, toGroup: groupID, toIndex: targetIndex)
+        }
+        if movedContainerIDs.isEmpty,
+           let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !cwd.isEmpty {
+            _ = tabManager.createWorkspaceContainer(
+                groupId: groupID,
+                name: URL(fileURLWithPath: cwd).lastPathComponent,
+                kind: .localDirectory,
+                rootPath: cwd,
+                select: false
+            )
+        }
+        guard let group = tabManager.workspaceGroups.first(where: { $0.id == groupID }) else {
             return .notCreated
         }
         return .created(controlWorkspaceGroupSnapshot(group, tabManager: tabManager))
@@ -118,9 +123,26 @@ extension TerminalController: ControlWorkspaceGroupContext {
     ) -> Int? {
         guard let tabManager = resolveTabManager(routing: routing) else { return nil }
         guard tabManager.workspaceGroups.contains(where: { $0.id == groupID }) else { return -1 }
-        let keptCount = tabManager.tabs.lazy.filter { $0.groupId == groupID }.count
-        tabManager.ungroupWorkspaceGroup(groupId: groupID)
-        return keptCount
+        let containers = tabManager.workspaceContainers.filter { $0.groupId == groupID }
+        let keptCount = containers.reduce(0) { count, container in
+            count + tabManager.workspaceLeaves(inContainer: container.id).count
+        }
+        if !containers.isEmpty {
+            let fallbackGroupID = tabManager.workspaceGroups.first(where: { $0.id != groupID })?.id
+                ?? tabManager.createWorkspaceGroup(
+                    name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces")
+                )
+            guard let fallbackGroupID else { return -1 }
+            for container in containers {
+                let targetIndex = tabManager.workspaceContainers.filter { $0.groupId == fallbackGroupID }.count
+                tabManager.moveWorkspaceContainer(
+                    containerId: container.id,
+                    toGroup: fallbackGroupID,
+                    toIndex: targetIndex
+                )
+            }
+        }
+        return tabManager.deleteWorkspaceGroup(groupId: groupID) ? keptCount : -1
     }
 
     func controlDeleteWorkspaceGroup(
@@ -129,7 +151,8 @@ extension TerminalController: ControlWorkspaceGroupContext {
     ) -> Int? {
         guard let tabManager = resolveTabManager(routing: routing) else { return nil }
         guard tabManager.workspaceGroups.contains(where: { $0.id == groupID }) else { return -1 }
-        return tabManager.deleteWorkspaceGroup(groupId: groupID)
+        guard !tabManager.workspaceContainers.contains(where: { $0.groupId == groupID }) else { return -2 }
+        return tabManager.deleteWorkspaceGroup(groupId: groupID) ? 0 : -1
     }
 
     func controlRenameWorkspaceGroup(
@@ -175,29 +198,30 @@ extension TerminalController: ControlWorkspaceGroupContext {
         guard let tabManager = resolveTabManager(routing: routing) else {
             return .tabManagerUnavailable
         }
-        let hasGroup = tabManager.workspaceGroups.contains(where: { $0.id == groupID })
-        guard let tab = tabManager.tabs.first(where: { $0.id == workspaceID }), hasGroup else {
+        guard tabManager.workspaceGroups.contains(where: { $0.id == groupID }),
+              let workspace = tabManager.tabs.first(where: { $0.id == workspaceID }),
+              let containerID = workspace.workspaceContainerId else {
             return .notFound
         }
-        if let referenceWorkspaceID,
-           !tabManager.tabs.contains(where: { $0.id == referenceWorkspaceID && $0.groupId == groupID }) {
-            return .invalidReferenceWorkspace
+        let targetContainers = tabManager.workspaceContainers.filter { $0.groupId == groupID }
+        let targetIndex: Int
+        switch placement ?? .end {
+        case .top:
+            targetIndex = 0
+        case .end:
+            targetIndex = targetContainers.count
+        case .afterCurrent:
+            guard let referenceWorkspaceID,
+                  let referenceContainerID = tabManager.tabs.first(where: { $0.id == referenceWorkspaceID })?.workspaceContainerId,
+                  let referenceIndex = targetContainers.firstIndex(where: { $0.id == referenceContainerID }) else {
+                return .invalidReferenceWorkspace
+            }
+            targetIndex = referenceIndex + 1
         }
-        // addWorkspaceToGroup silently no-ops for anchors of other groups.
-        // Confirm membership actually changed before reporting success.
-        tabManager.addWorkspaceToGroup(
-            workspaceId: workspaceID,
-            groupId: groupID,
-            placement: placement,
-            referenceWorkspaceId: referenceWorkspaceID
-        )
-        if tab.groupId == groupID {
-            return .added
-        }
-        if tabManager.workspaceGroups.contains(where: { $0.id != groupID && $0.anchorWorkspaceId == workspaceID }) {
-            return .workspaceIsOtherGroupAnchor
-        }
-        return .notFound
+        tabManager.moveWorkspaceContainer(containerId: containerID, toGroup: groupID, toIndex: targetIndex)
+        return tabManager.workspaceContainers.contains(where: { $0.id == containerID && $0.groupId == groupID })
+            ? .added
+            : .notFound
     }
 
     func controlRemoveWorkspaceFromGroup(
@@ -205,11 +229,19 @@ extension TerminalController: ControlWorkspaceGroupContext {
         workspaceID: UUID
     ) -> Bool? {
         guard let tabManager = resolveTabManager(routing: routing) else { return nil }
-        if let tab = tabManager.tabs.first(where: { $0.id == workspaceID }), tab.groupId != nil {
-            tabManager.removeWorkspaceFromGroup(workspaceId: workspaceID)
-            return true
+        guard let workspace = tabManager.tabs.first(where: { $0.id == workspaceID }),
+              let containerID = workspace.workspaceContainerId,
+              let container = tabManager.workspaceContainers.first(where: { $0.id == containerID }) else {
+            return false
         }
-        return false
+        let fallbackGroupID = tabManager.workspaceGroups.first(where: { $0.id != container.groupId })?.id
+            ?? tabManager.createWorkspaceGroup(
+                name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces")
+            )
+        guard let fallbackGroupID else { return false }
+        let targetIndex = tabManager.workspaceContainers.filter { $0.groupId == fallbackGroupID }.count
+        tabManager.moveWorkspaceContainer(containerId: containerID, toGroup: fallbackGroupID, toIndex: targetIndex)
+        return true
     }
 
     func controlSetWorkspaceGroupAnchor(
@@ -218,13 +250,13 @@ extension TerminalController: ControlWorkspaceGroupContext {
         workspaceID: UUID
     ) -> Bool? {
         guard let tabManager = resolveTabManager(routing: routing) else { return nil }
-        let hasGroup = tabManager.workspaceGroups.contains(where: { $0.id == groupID })
-        let hasWs = tabManager.tabs.contains(where: { $0.id == workspaceID && $0.groupId == groupID })
-        if hasGroup && hasWs {
-            tabManager.setWorkspaceGroupAnchor(groupId: groupID, workspaceId: workspaceID)
-            return true
+        guard let groupIndex = tabManager.workspaceGroups.firstIndex(where: { $0.id == groupID }),
+              let containerID = tabManager.tabs.first(where: { $0.id == workspaceID })?.workspaceContainerId,
+              tabManager.workspaceContainers.contains(where: { $0.id == containerID && $0.groupId == groupID }) else {
+            return false
         }
-        return false
+        tabManager.workspaceGroups[groupIndex].lastActiveWorkspaceId = workspaceID
+        return true
     }
 
     func controlCreateWorkspaceInGroup(
@@ -235,31 +267,23 @@ extension TerminalController: ControlWorkspaceGroupContext {
         guard let tabManager = resolveTabManager(routing: routing) else {
             return .tabManagerUnavailable
         }
-        // Placement resolution: explicit `placement` param wins, then the group's
-        // per-cwd `newWorkspacePlacement` from cmux.json, then the global default.
-        let explicitPlacement = WorkspaceGroupNewPlacement(rawString: placementRaw)
         if let raw = placementRaw,
            !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           explicitPlacement == nil {
+           WorkspaceGroupNewPlacement(rawString: raw) == nil {
             return .invalidPlacement(raw)
         }
-        guard let group = tabManager.workspaceGroups.first(where: { $0.id == groupID }) else {
+        guard tabManager.workspaceGroups.contains(where: { $0.id == groupID }),
+              let containerID = tabManager.createWorkspaceContainer(
+                groupId: groupID,
+                name: String(localized: "workspaceContainer.localSession", defaultValue: "Local Session"),
+                kind: .localSession,
+                rootPath: nil,
+                select: false
+              ),
+              let workspace = tabManager.workspaceLeaves(inContainer: containerID).first else {
             return .notFound
         }
-        let anchorCwd = tabManager.tabs.first(where: { $0.id == group.anchorWorkspaceId })?.currentDirectory
-        let configStore = AppDelegate.shared?.mainWindowContexts.values.first(where: { $0.tabManager === tabManager })?.cmuxConfigStore
-        let configured = configStore?.resolveWorkspaceGroupConfig(forCwd: anchorCwd)?.newWorkspacePlacement
-        let placement = explicitPlacement
-            ?? configured
-            ?? UserDefaultsSettingsClient(defaults: .standard).value(for: SettingCatalog().workspaceGroups.newWorkspacePlacement)
-        guard let newWs = tabManager.createWorkspaceInGroup(
-            groupId: groupID,
-            placement: placement,
-            select: false
-        ) else {
-            return .notFound
-        }
-        return .created(workspaceID: newWs.id)
+        return .created(workspaceID: workspace.id)
     }
 
     func controlSetWorkspaceGroupColor(
@@ -329,18 +353,25 @@ extension TerminalController: ControlWorkspaceGroupContext {
         guard let tabManager = resolveTabManager(routing: routing) else {
             return .tabManagerUnavailable
         }
-        guard let group = tabManager.workspaceGroups.first(where: { $0.id == groupID }),
-              let anchor = tabManager.tabs.first(where: { $0.id == group.anchorWorkspaceId }) else {
+        guard let group = tabManager.workspaceGroups.first(where: { $0.id == groupID }) else {
             return .notFound
         }
+        let memberContainerIDs = Set(
+            tabManager.workspaceContainers.filter { $0.groupId == groupID }.map(\.id)
+        )
+        let target = group.lastActiveWorkspaceId.flatMap { workspaceID in
+            tabManager.tabs.first(where: {
+                $0.id == workspaceID && $0.workspaceContainerId.map(memberContainerIDs.contains) == true
+            })
+        } ?? tabManager.tabs.first(where: {
+            $0.workspaceContainerId.map(memberContainerIDs.contains) == true
+        })
+        guard let target else { return .notFound }
         if let windowId = AppDelegate.shared?.windowId(for: tabManager) {
             _ = AppDelegate.shared?.focusMainWindow(windowId: windowId)
             setActiveTabManager(tabManager)
         }
-        // Route through selectWorkspace so the explicit-resume notification
-        // dismissal and other selection side effects fire, matching
-        // workspace.select and the sidebar header click path.
-        tabManager.selectWorkspace(anchor)
-        return .focused(anchorWorkspaceID: anchor.id)
+        tabManager.selectWorkspace(target)
+        return .focused(workspaceID: target.id)
     }
 }

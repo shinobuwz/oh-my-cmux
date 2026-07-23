@@ -1751,6 +1751,22 @@ struct SessionWorkspaceSnapshot: Codable, Sendable {
     var customColor: String?
     var isPinned: Bool
     var groupId: UUID? = nil
+    /// Immutable root bound to this sidebar leaf. Unlike `currentDirectory`, shell `cd` does not change it.
+    var boundRootPath: String? = nil
+    /// Whether cmux created and owns removal of this linked worktree.
+    var isManagedWorktree: Bool? = nil
+    /// Retained branch name used to recreate a missing cmux-managed worktree.
+    var managedWorktreeBranch: String? = nil
+    /// Structural leaf role inside its second-level workspace container.
+    var workspaceLeafRole: String? = nil
+    /// Named branch checked out by this worktree, when attached.
+    var worktreeHeadBranch: String? = nil
+    /// Commitish retained for a detached worktree, when known.
+    var worktreeHeadDetachedCommitish: String? = nil
+    /// Distinguishes detached HEAD with an unknown commitish from missing HEAD metadata.
+    var worktreeHeadIsDetached: Bool? = nil
+    /// Last derived missing/corrupt state; refreshed by Git recovery paths.
+    var isWorktreeBindingBroken: Bool? = nil
     var isManuallyUnread: Bool? = nil
     var hasUnreadIndicator: Bool? = nil
     var notifications: [SessionNotificationSnapshot]? = nil
@@ -1787,18 +1803,25 @@ struct SessionWorkspaceGroupSnapshot: Codable, Sendable, Equatable {
     var id: UUID
     var name: String
     var isCollapsed: Bool
-    /// The workspace whose close dissolves the group. Only meaningful within a single
-    /// app run; on restore, each workspace gets a fresh UUID. The loader prefers
-    /// `anchorMemberIndex` (restore-stable) and treats this field as a hint for in-process round-trips.
-    var anchorWorkspaceId: UUID? = nil
-    /// 0-based index of the anchor among the group's members in tab order. Restore-stable:
-    /// tab order is preserved across restore, so the same index resolves to the same
-    /// logical anchor even though workspace UUIDs change. Older snapshots that omit
-    /// this field fall back to "first member by tab order".
-    var anchorMemberIndex: Int? = nil
+    /// Original workspace id remapped through the adjacent workspace snapshots.
+    var lastActiveWorkspaceId: UUID? = nil
     var isPinned: Bool? = nil
     var customColor: String? = nil
     var iconSymbol: String? = nil
+}
+
+struct SessionWorkspaceContainerSnapshot: Codable, Sendable, Equatable {
+    var id: UUID
+    var groupId: UUID
+    var name: String
+    var kind: WorkspaceContainerKind
+    var rootPath: String? = nil
+    var repositoryCommonDirectory: String? = nil
+    var remoteHost: String? = nil
+    var isRootBroken: Bool? = nil
+    var isCollapsed: Bool
+    /// Original workspace id remapped through the adjacent workspace snapshots.
+    var lastActiveWorkspaceId: UUID? = nil
 }
 
 extension SessionWorkspaceSnapshot {
@@ -1817,6 +1840,7 @@ struct SessionTabManagerSnapshot: Codable, Sendable {
     var selectedWorkspaceIndex: Int?
     var workspaces: [SessionWorkspaceSnapshot]
     var workspaceGroups: [SessionWorkspaceGroupSnapshot]? = nil
+    var workspaceContainers: [SessionWorkspaceContainerSnapshot]? = nil
 }
 
 struct SessionWindowSnapshot: Codable, Sendable {

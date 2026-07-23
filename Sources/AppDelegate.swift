@@ -33,128 +33,6 @@ private enum CmuxThemeNotifications {
     static let reloadConfig = Notification.Name("com.cmuxterm.themes.reload-config")
 }
 
-private struct WorkspaceGroupNewWorkspaceTarget {
-    let groupId: UUID
-    let referenceWorkspaceId: UUID
-    let placement: WorkspaceGroupNewPlacement
-}
-
-/// Short-lived helper that watches for the next workspace to appear in a
-/// TabManager and joins it to a target group. Used by group `+` context-menu
-/// actions whose underlying executor creates the workspace asynchronously
-/// (cloudVM in particular launches `cmux vm base open` and returns immediately).
-/// Subscribes to `tabManager.tabsPublisher` (the legacy Combine bridge fed by
-/// every `tabs` mutation, regardless of whether a NotificationCenter event
-/// fired) so VM workspaces, dropped attaches, or any other slow async path
-/// is caught. Self-clears on first match, group disappearance, or a process
-/// completion signal that either names the created workspace or reports launch
-/// failure.
-@MainActor
-final class ConfiguredGroupActionAsyncWorkspaceObserver {
-    static var pending: [ObjectIdentifier: ConfiguredGroupActionAsyncWorkspaceObserver] = [:]
-    private let id = UUID()
-    private weak var tabManager: TabManager?
-    private let storedKey: ObjectIdentifier
-    private let groupId: UUID
-    private let placement: WorkspaceGroupNewPlacement
-    private let referenceWorkspaceId: UUID?
-    private var knownIds: Set<UUID>
-    private var subscription: AnyCancellable?
-
-    @discardableResult
-    static func install(
-        tabManager: TabManager,
-        groupId: UUID,
-        knownIds: Set<UUID>,
-        placement: WorkspaceGroupNewPlacement,
-        referenceWorkspaceId: UUID?
-    ) -> UUID {
-        let key = ObjectIdentifier(tabManager)
-        pending[key]?.dispose()
-        let watcher = ConfiguredGroupActionAsyncWorkspaceObserver(
-            tabManager: tabManager,
-            groupId: groupId,
-            placement: placement,
-            referenceWorkspaceId: referenceWorkspaceId,
-            knownIds: knownIds
-        )
-        pending[key] = watcher
-        watcher.subscription = tabManager.tabsPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak watcher] tabs in
-                watcher?.checkForNewWorkspace(in: tabs)
-            }
-        return watcher.id
-    }
-
-    static func disposePending(tabManager: TabManager, observerId: UUID) {
-        let key = ObjectIdentifier(tabManager)
-        guard pending[key]?.id == observerId else { return }
-        pending[key]?.dispose()
-    }
-
-    static func finishPending(tabManager: TabManager, observerId: UUID, workspaceId: UUID?) {
-        let key = ObjectIdentifier(tabManager)
-        guard let watcher = pending[key], watcher.id == observerId else { return }
-        watcher.finish(workspaceId: workspaceId)
-    }
-
-    private init(
-        tabManager: TabManager,
-        groupId: UUID,
-        placement: WorkspaceGroupNewPlacement,
-        referenceWorkspaceId: UUID?,
-        knownIds: Set<UUID>
-    ) {
-        self.tabManager = tabManager
-        self.storedKey = ObjectIdentifier(tabManager)
-        self.groupId = groupId
-        self.placement = placement
-        self.referenceWorkspaceId = referenceWorkspaceId
-        self.knownIds = knownIds
-    }
-
-    private func checkForNewWorkspace(in tabs: [Workspace]) {
-        guard let tabManager else { dispose(); return }
-        guard tabManager.workspaceGroups.contains(where: { $0.id == groupId }) else {
-            dispose()
-            return
-        }
-        for tab in tabs where !knownIds.contains(tab.id) {
-            tabManager.addWorkspaceToGroup(
-                workspaceId: tab.id,
-                groupId: groupId,
-                placement: placement,
-                referenceWorkspaceId: referenceWorkspaceId
-            )
-            dispose()
-            return
-        }
-    }
-
-    private func finish(workspaceId: UUID?) {
-        defer { dispose() }
-        guard let workspaceId, let tabManager else { return }
-        guard tabManager.workspaceGroups.contains(where: { $0.id == groupId }) else { return }
-        guard tabManager.tabs.contains(where: { $0.id == workspaceId }) else { return }
-        tabManager.addWorkspaceToGroup(
-            workspaceId: workspaceId,
-            groupId: groupId,
-            placement: placement,
-            referenceWorkspaceId: referenceWorkspaceId
-        )
-    }
-
-    private func dispose() {
-        subscription?.cancel()
-        subscription = nil
-        // Remove by the key recorded at install time. The weak `tabManager`
-        // may already be nil here (window closed mid-watch), and walking it
-        // would silently leak the entry in the static `pending` dictionary
-        // for the rest of the app session.
-        Self.pending.removeValue(forKey: storedKey)
-    }
-}
 
 #if DEBUG
 enum CmuxTypingTiming {
@@ -1044,6 +922,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var didPrepareStartupSessionSnapshot = false
     var didAttemptStartupSessionRestore = false
     var isApplyingSessionRestore = false
+    private var legacyGitRootMigrationStarted = false
     /// Durable navigation links that arrived before startup restore registered
     /// their target workspaces.
     var pendingStartupNavigationURLRequests: [CmuxNavigationURLRequest] = []
@@ -3349,7 +3228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
 
-        guard let startupSnapshot else { return false }
+        guard let startupSnapshot else {
+            migrateLegacyGitWorktreeRootsIfNeeded()
+            return false
+        }
 
         let additionalWindows = Array(startupSnapshot
             .windows
@@ -3393,6 +3275,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // Auto-resume input can be queued before tmux has spawned; preserve
             // restored process-detected bindings until a later live scan.
             _ = saveSessionSnapshot(includeScrollback: false)
+        }
+        migrateLegacyGitWorktreeRootsIfNeeded()
+    }
+
+    private func migrateLegacyGitWorktreeRootsIfNeeded() {
+        guard !legacyGitRootMigrationStarted else { return }
+        let defaults = UserDefaults.standard
+        let key = GitWorktreeStore.repositoryRootsDefaultsKey
+        let roots: [String]
+        if let data = defaults.data(forKey: key),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            roots = decoded
+        } else {
+            roots = defaults.stringArray(forKey: key) ?? []
+        }
+        guard !roots.isEmpty else { return }
+        guard let targetContext = sortedMainWindowContextsForSessionSnapshot().first else { return }
+        legacyGitRootMigrationStarted = true
+
+        Task { @MainActor [weak self, weak targetManager = targetContext.tabManager] in
+            guard let self, let targetManager else { return }
+            var identities = Set(self.mainWindowContexts.values.flatMap { context in
+                context.tabManager.workspaceContainers.compactMap { container in
+                    container.repositoryCommonDirectory ?? container.rootPath
+                }
+            })
+            var migrationGroupId: UUID?
+            var succeeded = true
+
+            for rawRoot in roots {
+                let root = URL(fileURLWithPath: rawRoot, isDirectory: true).standardizedFileURL.path
+                let resolution = await targetManager.gitWorktreeService.resolveRepository(containing: root)
+                let identity: String
+                switch resolution {
+                case .worktree(let repository): identity = repository.commonDirectory
+                case .bare(let path): identity = path
+                case .notARepository: identity = root
+                }
+                guard !identities.contains(identity) else { continue }
+                if migrationGroupId == nil {
+                    migrationGroupId = targetManager.createWorkspaceGroup(
+                        name: String(localized: "workspaceGroup.gitRepositories", defaultValue: "Git Repositories")
+                    )
+                }
+                guard let groupId = migrationGroupId else {
+                    succeeded = false
+                    break
+                }
+
+                switch resolution {
+                case .worktree:
+                    let result = await targetManager.registerWorkspaceRoot(
+                        groupId: groupId,
+                        path: root,
+                        select: false
+                    )
+                    switch result {
+                    case .success:
+                        identities.insert(identity)
+                    case .failure:
+                        succeeded = false
+                    }
+                case .notARepository:
+                    guard let containerId = targetManager.createWorkspaceContainer(
+                        groupId: groupId,
+                        name: URL(fileURLWithPath: root).lastPathComponent,
+                        kind: .git,
+                        rootPath: root,
+                        select: false
+                    ) else {
+                        succeeded = false
+                        continue
+                    }
+                    if let index = targetManager.workspaceContainers.firstIndex(where: { $0.id == containerId }) {
+                        targetManager.workspaceContainers[index].isRootBroken = true
+                    }
+                    for leaf in targetManager.workspaceLeaves(inContainer: containerId) {
+                        leaf.isWorktreeBindingBroken = true
+                    }
+                    identities.insert(identity)
+                case .bare:
+                    succeeded = false
+                }
+            }
+
+            if let migrationGroupId,
+               targetManager.workspaceContainers.allSatisfy({ $0.groupId != migrationGroupId }) {
+                _ = targetManager.deleteWorkspaceGroup(groupId: migrationGroupId)
+            }
+            guard succeeded,
+                  let snapshot = self.buildSessionSnapshot(includeScrollback: false),
+                  self.sessionSnapshotStore.save(snapshot, fileURL: nil) else {
+                return
+            }
+            defaults.removeObject(forKey: key)
         }
     }
 
@@ -7300,12 +7277,458 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         event: NSEvent? = nil,
         debugSource: String = "newWorkspace"
     ) -> Bool {
-        performNewWorkspaceCreationAction(
-            initialSurface: .terminal,
-            preferredTabManager: preferredTabManager,
+        performNewWorkspaceRootAction(
+            tabManager: preferredTabManager,
             event: event,
             debugSource: debugSource
         )
+    }
+
+    @discardableResult
+    func performNewWorktreeAction(
+        tabManager preferredTabManager: TabManager? = nil,
+        event: NSEvent? = nil,
+        debugSource: String = "newWorktree"
+    ) -> Bool {
+        guard let context = preferredTabManager.flatMap({ mainWindowContext(for: $0) })
+            ?? preferredMainWindowContextForWorkspaceCreation(event: event, debugSource: debugSource),
+              let selectedWorkspaceId = context.tabManager.selectedTabId,
+              let container = context.tabManager.workspaceContainer(for: selectedWorkspaceId),
+              container.kind == .git else {
+            NSSound.beep()
+            return false
+        }
+        return requestCreateWorktree(
+            containerId: container.id,
+            tabManager: context.tabManager,
+            preferredWindow: resolvedWindow(for: context)
+        )
+    }
+
+    @discardableResult
+    private func performNewWorkspaceRootAction(
+        tabManager preferredTabManager: TabManager?,
+        event: NSEvent?,
+        debugSource: String
+    ) -> Bool {
+        var context = preferredTabManager.flatMap { mainWindowContext(for: $0) }
+            ?? preferredMainWindowContextForWorkspaceCreation(event: event, debugSource: debugSource)
+        if context == nil {
+            let windowId = createMainWindow()
+            context = mainWindowContexts.values.first(where: { $0.windowId == windowId })
+        }
+        guard let context else { return false }
+        let groupId = context.tabManager.selectedTabId
+            .flatMap { context.tabManager.workspaceGroup(for: $0)?.id }
+            ?? context.tabManager.workspaceGroups.first?.id
+            ?? context.tabManager.createWorkspaceGroup(
+                name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces")
+            )
+        guard let groupId else { return false }
+        return chooseWorkspaceRoot(
+            forGroup: groupId,
+            tabManager: context.tabManager,
+            preferredWindow: resolvedWindow(for: context),
+            rollbackEmptyGroupOnFailure: false
+        )
+    }
+
+    @discardableResult
+    func chooseWorkspaceRoot(
+        forGroup groupId: UUID,
+        tabManager: TabManager,
+        preferredWindow: NSWindow? = nil,
+        rollbackEmptyGroupOnFailure: Bool = false
+    ) -> Bool {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.title = String(localized: "workspaceContainer.chooseRoot.title", defaultValue: "Choose Workspace Root")
+        panel.prompt = String(localized: "workspaceContainer.chooseRoot.prompt", defaultValue: "Add Workspace")
+        if let root = tabManager.selectedWorkspace?.boundRootPath {
+            panel.directoryURL = URL(fileURLWithPath: root)
+        }
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return false }
+        Task { @MainActor [weak self, weak tabManager] in
+            guard let self, let tabManager else { return }
+            let result = await tabManager.registerWorkspaceRoot(
+                groupId: groupId,
+                path: selectedURL.path,
+                select: false
+            )
+            switch result {
+            case .success(.created(_, let workspaceId)):
+                if let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) {
+                    tabManager.selectWorkspace(workspace)
+                }
+            case .success(.existing(_, let workspaceId)):
+                let alert = NSAlert()
+                alert.alertStyle = .informational
+                alert.messageText = String(
+                    localized: "workspaceContainer.duplicate.title",
+                    defaultValue: "Workspace already added"
+                )
+                alert.informativeText = String(
+                    localized: "workspaceContainer.duplicate.message",
+                    defaultValue: "This root already belongs to a workspace in this window."
+                )
+                alert.addButton(withTitle: String(
+                    localized: "workspaceContainer.duplicate.locate",
+                    defaultValue: "Locate Existing"
+                ))
+                alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+                if alert.runModal() == .alertFirstButtonReturn,
+                   let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) {
+                    tabManager.selectWorkspace(workspace)
+                }
+            case .failure(let error):
+                if rollbackEmptyGroupOnFailure {
+                    _ = tabManager.deleteWorkspaceGroup(groupId: groupId)
+                }
+                self.presentWorkspaceRootRegistrationError(error, preferredWindow: preferredWindow)
+            }
+        }
+        return true
+    }
+
+    private func presentWorkspaceRootRegistrationError(
+        _ error: WorkspaceRootRegistrationError,
+        preferredWindow: NSWindow?
+    ) {
+        let detail: String
+        switch error {
+        case .missingGroup, .creationFailed:
+            detail = String(localized: "workspaceContainer.error.create", defaultValue: "cmux could not create the workspace.")
+        case .invalidDirectory(let path):
+            detail = String(
+                format: String(localized: "workspaceContainer.error.invalidDirectory", defaultValue: "The folder no longer exists: %@"),
+                path
+            )
+        case .bareRepository(let path):
+            detail = String(
+                format: String(localized: "workspaceContainer.error.bareRepository", defaultValue: "Bare Git repositories are not supported: %@"),
+                path
+            )
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(localized: "workspaceContainer.error.title", defaultValue: "Couldn’t add workspace")
+        alert.informativeText = detail
+        alert.addButton(withTitle: String(localized: "common.ok", defaultValue: "OK"))
+        if let preferredWindow {
+            alert.beginSheetModal(for: preferredWindow)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    @discardableResult
+    func requestCreateWorktree(
+        containerId: UUID,
+        tabManager: TabManager,
+        preferredWindow: NSWindow? = nil
+    ) -> Bool {
+        guard tabManager.workspaceContainers.first(where: { $0.id == containerId })?.kind == .git else {
+            NSSound.beep()
+            return false
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = String(localized: "worktree.create.title", defaultValue: "Create Worktree")
+        alert.informativeText = String(
+            localized: "worktree.create.message",
+            defaultValue: "Enter a new branch name. cmux will create its worktree and open a terminal."
+        )
+        let field = NSTextField(string: "")
+        field.placeholderString = String(localized: "worktree.create.branchPlaceholder", defaultValue: "feature/my-branch")
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: String(localized: "worktree.create.confirm", defaultValue: "Create Worktree"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        let branch = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branch.isEmpty else { NSSound.beep(); return false }
+        Task { @MainActor [weak self, weak tabManager] in
+            guard let self, let tabManager else { return }
+            do {
+                _ = try await tabManager.createManagedWorktree(
+                    inContainer: containerId,
+                    branch: branch,
+                    select: true
+                )
+            } catch let error as ManagedWorktreeMutationError {
+                self.presentManagedWorktreeError(error, preferredWindow: preferredWindow)
+            } catch {
+                self.presentManagedWorktreeError(.missingContainer, preferredWindow: preferredWindow)
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func requestDeleteWorktree(
+        workspaceId: UUID,
+        tabManager: TabManager,
+        preferredWindow: NSWindow? = nil
+    ) -> Bool {
+        guard let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else { return false }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = workspace.isManagedWorktree
+            ? String(localized: "worktree.delete.title", defaultValue: "Delete worktree?")
+            : String(localized: "worktree.remove.title", defaultValue: "Remove worktree from cmux?")
+        alert.informativeText = workspace.isManagedWorktree
+            ? String(localized: "worktree.delete.message", defaultValue: "The worktree directory will be removed. Its Git branch will be preserved.")
+            : String(localized: "worktree.remove.message", defaultValue: "The linked worktree will remain on disk and only this sidebar leaf will be removed.")
+        alert.addButton(withTitle: workspace.isManagedWorktree
+            ? String(localized: "worktree.delete.confirm", defaultValue: "Delete Worktree")
+            : String(localized: "worktree.remove.confirm", defaultValue: "Remove from cmux"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        if !workspace.isManagedWorktree {
+            do {
+                try tabManager.removeExternalWorktreeLeaf(workspaceId: workspaceId)
+            } catch let error as ManagedWorktreeMutationError {
+                presentManagedWorktreeError(error, preferredWindow: preferredWindow)
+            } catch {
+                presentManagedWorktreeError(.missingContainer, preferredWindow: preferredWindow)
+            }
+            return true
+        }
+        Task { @MainActor [weak self, weak tabManager] in
+            guard let self, let tabManager else { return }
+            do {
+                try await tabManager.removeManagedWorktree(workspaceId: workspaceId)
+            } catch let error as ManagedWorktreeMutationError {
+                guard case .git = error else {
+                    self.presentManagedWorktreeError(error, preferredWindow: preferredWindow)
+                    return
+                }
+                let forceAlert = NSAlert()
+                forceAlert.alertStyle = .critical
+                forceAlert.messageText = String(localized: "worktree.delete.force.title", defaultValue: "Force delete worktree?")
+                forceAlert.informativeText = String(
+                    localized: "worktree.delete.force.message",
+                    defaultValue: "Git refused the normal removal. Force removal may discard uncommitted changes; the branch will still be preserved."
+                )
+                forceAlert.addButton(withTitle: String(localized: "worktree.delete.force.confirm", defaultValue: "Force Delete"))
+                forceAlert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+                guard forceAlert.runModal() == .alertFirstButtonReturn else { return }
+                do {
+                    try await tabManager.removeManagedWorktree(workspaceId: workspaceId, force: true)
+                } catch let forcedError as ManagedWorktreeMutationError {
+                    self.presentManagedWorktreeError(forcedError, preferredWindow: preferredWindow)
+                } catch {
+                    self.presentManagedWorktreeError(.missingContainer, preferredWindow: preferredWindow)
+                }
+            } catch {
+                self.presentManagedWorktreeError(.missingContainer, preferredWindow: preferredWindow)
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func requestDeleteWorkspaceContainer(
+        containerId: UUID,
+        tabManager: TabManager,
+        preferredWindow: NSWindow? = nil
+    ) -> Bool {
+        guard let container = tabManager.workspaceContainers.first(where: { $0.id == containerId }) else {
+            return false
+        }
+        let managedBranches = tabManager.workspaceLeaves(inContainer: containerId)
+            .filter { $0.workspaceLeafRole == .managed }
+            .map { $0.managedWorktreeBranch ?? $0.title }
+        let managedList = managedBranches.isEmpty
+            ? String(localized: "workspaceContainer.delete.noManaged", defaultValue: "No linked worktree directories will be deleted.")
+            : managedBranches.map { "• \($0)" }.joined(separator: "\n")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(
+            format: String(localized: "workspaceContainer.delete.title", defaultValue: "Delete workspace “%@”?"),
+            container.name
+        )
+        alert.informativeText = String(
+            format: String(
+                localized: "workspaceContainer.delete.message",
+                defaultValue: "The workspace will be removed from cmux. Its main root and Git branches are preserved. cmux-managed linked worktree directories listed below will be deleted.\n\n%@"
+            ),
+            managedList
+        )
+        alert.addButton(withTitle: String(localized: "workspaceContainer.delete.confirm", defaultValue: "Delete Workspace"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+
+        Task { @MainActor [weak self, weak tabManager] in
+            guard let self, let tabManager else { return }
+            do {
+                try await tabManager.deleteWorkspaceContainer(containerId: containerId)
+            } catch let error as ManagedWorktreeMutationError {
+                guard case .git = error else {
+                    self.presentManagedWorktreeError(error, preferredWindow: preferredWindow)
+                    return
+                }
+                let forceAlert = NSAlert()
+                forceAlert.alertStyle = .critical
+                forceAlert.messageText = String(
+                    localized: "workspaceContainer.delete.force.title",
+                    defaultValue: "Force delete remaining worktrees?"
+                )
+                forceAlert.informativeText = String(
+                    localized: "workspaceContainer.delete.force.message",
+                    defaultValue: "Git refused a normal removal. Force removal may discard uncommitted changes; every branch and the main root will still be preserved."
+                )
+                forceAlert.addButton(withTitle: String(
+                    localized: "workspaceContainer.delete.force.confirm",
+                    defaultValue: "Force Delete"
+                ))
+                forceAlert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+                guard forceAlert.runModal() == .alertFirstButtonReturn else { return }
+                do {
+                    try await tabManager.deleteWorkspaceContainer(containerId: containerId, force: true)
+                } catch let forcedError as ManagedWorktreeMutationError {
+                    self.presentManagedWorktreeError(forcedError, preferredWindow: preferredWindow)
+                } catch {
+                    self.presentManagedWorktreeError(.missingContainer, preferredWindow: preferredWindow)
+                }
+            } catch {
+                self.presentManagedWorktreeError(.missingContainer, preferredWindow: preferredWindow)
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func requestRecreateWorktree(
+        workspaceId: UUID,
+        tabManager: TabManager,
+        preferredWindow: NSWindow? = nil
+    ) -> Bool {
+        guard let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }),
+              workspace.isManagedWorktree else {
+            NSSound.beep()
+            return false
+        }
+        Task { @MainActor [weak self, weak tabManager] in
+            guard let self, let tabManager else { return }
+            do {
+                try await tabManager.recreateManagedWorktree(workspaceId: workspaceId)
+            } catch let error as ManagedWorktreeMutationError {
+                self.presentManagedWorktreeError(error, preferredWindow: preferredWindow)
+            } catch {
+                self.presentManagedWorktreeError(.missingContainer, preferredWindow: preferredWindow)
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func requestLocateWorkspaceRoot(
+        containerId: UUID,
+        tabManager: TabManager,
+        preferredWindow: NSWindow? = nil
+    ) -> Bool {
+        guard let container = tabManager.workspaceContainers.first(where: { $0.id == containerId }) else {
+            NSSound.beep()
+            return false
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.title = String(localized: "workspaceContainer.locateRoot.title", defaultValue: "Locate Workspace Root")
+        panel.prompt = String(localized: "workspaceContainer.locateRoot.prompt", defaultValue: "Locate Root")
+        if let rootPath = container.rootPath {
+            panel.directoryURL = URL(fileURLWithPath: rootPath)
+        }
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return false }
+        Task { @MainActor [weak self, weak tabManager] in
+            guard let self, let tabManager else { return }
+            let result = await tabManager.relocateWorkspaceContainer(
+                containerId: containerId,
+                to: selectedURL.path
+            )
+            switch result {
+            case .success(.created):
+                break
+            case .success(.existing(_, let workspaceId)):
+                let alert = NSAlert()
+                alert.alertStyle = .informational
+                alert.messageText = String(
+                    localized: "workspaceContainer.duplicate.title",
+                    defaultValue: "Workspace already added"
+                )
+                alert.informativeText = String(
+                    localized: "workspaceContainer.duplicate.message",
+                    defaultValue: "This root already belongs to a workspace in this window."
+                )
+                alert.addButton(withTitle: String(
+                    localized: "workspaceContainer.duplicate.locate",
+                    defaultValue: "Locate Existing"
+                ))
+                alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+                if alert.runModal() == .alertFirstButtonReturn,
+                   let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) {
+                    tabManager.selectWorkspace(workspace)
+                }
+            case .failure(let error):
+                self.presentWorkspaceRootRegistrationError(error, preferredWindow: preferredWindow)
+            }
+        }
+        return true
+    }
+
+    private func presentManagedWorktreeError(
+        _ error: ManagedWorktreeMutationError,
+        preferredWindow: NSWindow?
+    ) {
+        let detail: String
+        switch error {
+        case .missingContainer:
+            detail = String(localized: "worktree.error.missingContainer", defaultValue: "The workspace is no longer available.")
+        case .notGitContainer:
+            detail = String(localized: "worktree.error.notGit", defaultValue: "This workspace root is not an available Git repository.")
+        case .unbornRepository:
+            detail = String(localized: "worktree.error.unborn", defaultValue: "Create the repository’s first commit before adding a worktree.")
+        case .mainWorktree:
+            detail = String(localized: "worktree.error.main", defaultValue: "The main worktree is fixed. Remove the workspace root instead.")
+        case .unmanagedWorktree:
+            detail = String(localized: "worktree.error.unmanaged", defaultValue: "This worktree is not managed by cmux.")
+        case .missingManagedBranch:
+            detail = String(localized: "worktree.error.missingBranch", defaultValue: "cmux no longer knows which branch should recreate this worktree.")
+        case .crossWindowReference(let windowId):
+            detail = String(
+                format: String(localized: "worktree.error.crossWindow", defaultValue: "This worktree is open in another cmux window (%@). Locate it there before deleting."),
+                windowId.uuidString
+            )
+        case .git(let gitError):
+            switch gitError {
+            case .invalidBranchName(let branch):
+                detail = String(
+                    format: String(localized: "worktree.error.invalidBranch", defaultValue: "Git rejected the branch name: %@"),
+                    branch
+                )
+            case .filesystemFailure(_, let message):
+                detail = message
+            case .commandFailed(_, _, let stderr):
+                detail = stderr.isEmpty
+                    ? String(localized: "worktree.error.git", defaultValue: "The Git operation failed.")
+                    : stderr
+            }
+        }
+        let errorAlert = NSAlert()
+        errorAlert.alertStyle = .warning
+        errorAlert.messageText = String(localized: "worktree.error.title", defaultValue: "Worktree operation failed")
+        errorAlert.informativeText = detail
+        errorAlert.addButton(withTitle: String(localized: "common.ok", defaultValue: "OK"))
+        if let preferredWindow {
+            errorAlert.beginSheetModal(for: preferredWindow)
+        } else {
+            errorAlert.runModal()
+        }
     }
 
     /// Creates a new workspace whose initial surface is a browser pane in its
@@ -7472,7 +7895,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let context = livePreferredContext
             ?? preferredMainWindowContextForWorkspaceCreation(event: event, debugSource: debugSource)
 
-        let workspaceGroupTarget = context.flatMap { workspaceGroupNewWorkspaceTarget(in: $0) }
         // The configured new-workspace action is the user's override for the
         // plain New Workspace behavior; the browser variant keeps its own
         // fixed semantics and skips it.
@@ -7480,31 +7902,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
            let context,
            executeConfiguredNewWorkspaceActionIfAvailable(
                in: context,
-               debugSource: debugSource,
-               workspaceGroupTarget: workspaceGroupTarget
+               debugSource: debugSource
            ) {
             return true
         }
 
-        if let context, let workspaceGroupTarget {
-            guard let workspace = context.tabManager.createWorkspaceInGroup(
-                groupId: workspaceGroupTarget.groupId,
-                placement: workspaceGroupTarget.placement,
-                referenceWorkspaceId: workspaceGroupTarget.referenceWorkspaceId,
-                initialSurface: initialSurface,
-                title: title,
-                initialBrowserURL: initialBrowserURL,
-                initialBrowserOmnibarVisible: initialBrowserOmnibarVisible,
-                initialBrowserTransparentBackground: initialBrowserTransparentBackground
-            ) else {
-                return false
-            }
-            createdWorkspaceHandler?(workspace)
-            if initialSurface == .browser, focusInitialBrowserAddressBarOnCreate {
-                focusInitialBrowserAddressBar(in: workspace)
-            }
-            return true
-        }
 
         if let preferredTabManager,
            preferredContext == nil || livePreferredContext != nil {
@@ -7832,11 +8234,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         mainWindowContexts.values.first(where: { $0.tabManager === tabManager })
     }
 
+    func windowIdReferencingBoundRoot(_ rootPath: String, excluding excludedManager: TabManager) -> UUID? {
+        let canonicalRoot = URL(fileURLWithPath: rootPath).standardizedFileURL.resolvingSymlinksInPath().path
+        return mainWindowContexts.values.first { context in
+            guard context.tabManager !== excludedManager else { return false }
+            return context.tabManager.tabs.contains { workspace in
+                guard let boundRootPath = workspace.boundRootPath else { return false }
+                return URL(fileURLWithPath: boundRootPath)
+                    .standardizedFileURL
+                    .resolvingSymlinksInPath()
+                    .path == canonicalRoot
+            }
+        }?.windowId
+    }
+
     private func executeConfiguredNewWorkspaceActionIfAvailable(
         in context: MainWindowContext,
         debugSource: String,
-        replacingInitialWorkspace initialWorkspace: Workspace? = nil,
-        workspaceGroupTarget: WorkspaceGroupNewWorkspaceTarget? = nil
+        replacingInitialWorkspace initialWorkspace: Workspace? = nil
     ) -> Bool {
         guard let cmuxConfigStore = context.cmuxConfigStore,
               let action = cmuxConfigStore.resolvedNewWorkspaceAction() else {
@@ -7853,87 +8268,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
 #endif
         let initialWorkspaceId = initialWorkspace?.id
-        if let workspaceGroupTarget,
-           case .builtIn(.newWorkspace) = action.action {
-            return context.tabManager.createWorkspaceInGroup(
-                groupId: workspaceGroupTarget.groupId,
-                placement: workspaceGroupTarget.placement,
-                referenceWorkspaceId: workspaceGroupTarget.referenceWorkspaceId
-            ) != nil
-        }
-
-        let beforeIds = workspaceGroupTarget.map { _ in Set(context.tabManager.tabs.map(\.id)) }
-        var asyncObserverId: UUID?
         // Named workspace commands and inline workspace actions both create a
         // workspace, so both must retire the throwaway initial workspace.
         let actionCreatesWorkspace = action.workspaceCommandName != nil || action.action.inlineWorkspace != nil || action.action == .builtIn(.newAgentChat)
-        let onExecuted: (() -> Void)? = (!actionCreatesWorkspace && workspaceGroupTarget == nil) ? nil : { [weak self, weak context] in
-            if let context,
-               let workspaceGroupTarget,
-               let beforeIds {
-                let afterIds = context.tabManager.tabs.map(\.id)
-                var newlyCreatedId: UUID?
-                for id in afterIds where !beforeIds.contains(id) {
-                    context.tabManager.addWorkspaceToGroup(
-                        workspaceId: id,
-                        groupId: workspaceGroupTarget.groupId,
-                        placement: workspaceGroupTarget.placement,
-                        referenceWorkspaceId: workspaceGroupTarget.referenceWorkspaceId
-                    )
-                    newlyCreatedId = id
-                    break
-                }
-                if newlyCreatedId == nil, case .builtIn(.cloudVM) = action.action {
-                    asyncObserverId = ConfiguredGroupActionAsyncWorkspaceObserver.install(
-                        tabManager: context.tabManager,
-                        groupId: workspaceGroupTarget.groupId,
-                        knownIds: Set(afterIds),
-                        placement: workspaceGroupTarget.placement,
-                        referenceWorkspaceId: workspaceGroupTarget.referenceWorkspaceId
-                    )
-                }
-            }
-            if actionCreatesWorkspace {
-                self?.closeInitialWorkspaceIfNeeded(
-                    initialWorkspaceId: initialWorkspaceId,
-                    in: context
-                )
-            }
-        }
-        let onCloudVMCompletion: ((CloudVMActionLauncher.Completion) -> Void)? = workspaceGroupTarget == nil ? nil : { [weak context] completion in
-            guard let context, let asyncObserverId else { return }
-            ConfiguredGroupActionAsyncWorkspaceObserver.finishPending(
-                tabManager: context.tabManager,
-                observerId: asyncObserverId,
-                workspaceId: completion.succeeded ? completion.workspaceId : nil
+        let onExecuted: (() -> Void)? = actionCreatesWorkspace ? { [weak self, weak context] in
+            self?.closeInitialWorkspaceIfNeeded(
+                initialWorkspaceId: initialWorkspaceId,
+                in: context
             )
-        }
+        } : nil
         return executeConfiguredCmuxAction(
             action,
             context: context,
             preferredWindow: window,
-            onExecuted: onExecuted,
-            onCloudVMCompletion: onCloudVMCompletion
+            onExecuted: onExecuted
         )
     }
 
-    private func workspaceGroupNewWorkspaceTarget(in context: MainWindowContext) -> WorkspaceGroupNewWorkspaceTarget? {
-        let tabManager = context.tabManager
-        guard let selectedWorkspaceId = tabManager.selectedTabId,
-              let selectedWorkspace = tabManager.tabs.first(where: { $0.id == selectedWorkspaceId }),
-              let groupId = selectedWorkspace.groupId,
-              let group = tabManager.workspaceGroups.first(where: { $0.id == groupId }) else {
-            return nil
-        }
-        let anchorCwd = tabManager.tabs.first(where: { $0.id == group.anchorWorkspaceId })?.currentDirectory
-        let configured = context.cmuxConfigStore?.resolveWorkspaceGroupConfig(forCwd: anchorCwd)?.newWorkspacePlacement
-        return WorkspaceGroupNewWorkspaceTarget(
-            groupId: groupId,
-            referenceWorkspaceId: selectedWorkspaceId,
-            placement: configured
-                ?? UserDefaultsSettingsClient(defaults: .standard).value(for: SettingCatalog().workspaceGroups.newWorkspacePlacement)
-        )
-    }
 
     private func closeInitialWorkspaceIfNeeded(
         initialWorkspaceId: UUID?,
@@ -13528,6 +13879,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        if matchConfiguredShortcut(event: event, action: .newWorktree) {
+#if DEBUG
+            cmuxDebugLog("shortcut.action name=newWorktree \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            return performNewWorktreeAction(event: event, debugSource: "shortcut.newWorktree")
+        }
+
         if matchConfiguredShortcut(event: event, action: .newBrowserWorkspace) {
 #if DEBUG
             cmuxDebugLog("shortcut.action name=newBrowserWorkspace \(debugShortcutRouteSnapshot(event: event))")
@@ -14964,11 +15322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let resolvedTabManager: TabManager? = contextForMainWindow(targetWindow)?.tabManager ?? self.tabManager
         guard let tabManager = resolvedTabManager else { return false }
         guard let focusedId = tabManager.selectedTabId,
-              let groupId = tabManager.tabs.first(where: { $0.id == focusedId })?.groupId else {
-            // Don't consume the event when the focused workspace isn't in a
-            // group — let the matched chord propagate (no React Grab
-            // collision here, but stay consistent with the group-create
-            // shortcut's fall-through policy).
+              let groupId = tabManager.workspaceGroup(for: focusedId)?.id else {
             return false
         }
         tabManager.toggleWorkspaceGroupCollapsed(groupId: groupId)
@@ -14980,55 +15334,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let targetWindow = preferredWindow ?? shortcutRoutingActiveWindow
         let resolvedTabs: TabManager? = explicitTabManager ?? contextForMainWindow(targetWindow)?.tabManager ?? self.tabManager
         guard let tabs = resolvedTabs, tabs.selectedTab?.isRemoteTmuxMirror != true else { return false }
-        return tabs.createWorkspaceGroup(name: "") != nil
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = String(localized: "workspaceGroup.create.title", defaultValue: "New Workspace Group")
+        alert.informativeText = String(
+            localized: "workspaceGroup.create.message",
+            defaultValue: "Name the group, then choose its first workspace root."
+        )
+        let field = NSTextField(string: String(
+            format: tabs.localizedAutoGroupNameFormat,
+            tabs.workspaceGroups.count + 1
+        ))
+        field.placeholderString = String(localized: "workspaceGroup.create.namePlaceholder", defaultValue: "Group name")
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: String(localized: "common.continue", defaultValue: "Continue"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let groupId = tabs.createWorkspaceGroup(name: name) else {
+            NSSound.beep()
+            return false
+        }
+        let started = chooseWorkspaceRoot(
+            forGroup: groupId,
+            tabManager: tabs,
+            preferredWindow: targetWindow,
+            rollbackEmptyGroupOnFailure: true
+        )
+        if !started { _ = tabs.deleteWorkspaceGroup(groupId: groupId) }
+        return started
     }
 
     @discardableResult
     func handleGroupSelectedWorkspacesShortcut(preferredWindow: NSWindow? = nil) -> Bool {
-        // Resolve the TabManager for the preferred/key/main window first so
-        // multi-window users get the group created in the window they were
-        // looking at. Fall back to the app-level tabManager only if no window
-        // context resolves.
         let targetWindow = preferredWindow ?? shortcutRoutingActiveWindow
-        let resolvedTabManager: TabManager? = contextForMainWindow(targetWindow)?.tabManager ?? self.tabManager
+        let resolvedTabManager = contextForMainWindow(targetWindow)?.tabManager ?? self.tabManager
         guard let tabManager = resolvedTabManager else { return false }
-        let selectedSet = tabManager.sidebarSelectedWorkspaceIds
-        // sidebarSelectedWorkspaceIds is a Set; sort by tabs[] order so the
-        // anchor is placed before the first sidebar-visible selected workspace
-        // (createWorkspaceGroup uses the first child to position the anchor).
-        let orderedSelectedIds: [UUID] = selectedSet.isEmpty
-            ? []
-            : tabManager.tabs.compactMap { selectedSet.contains($0.id) ? $0.id : nil }
-        // Only consume the shortcut when there's an explicit sidebar
-        // multi-selection. Anything ≤ 1 falls through so ⌘⇧G keeps working as
-        // React Grab's default in browser/terminal contexts. A single-tab
-        // group can still be created via right-click → New Group from
-        // Workspace. `sidebarSelectedWorkspaceIds` is normally synced to the
-        // focused workspace (clearSidebarMultiSelection sets it to a
-        // singleton after keyboard nav), so the singleton case must be
-        // treated the same as "no selection."
-        guard orderedSelectedIds.count >= 2 else { return false }
-        let candidateIds: [UUID] = orderedSelectedIds
-        // Match the workspace context-menu eligibility filter so the shortcut
-        // doesn't silently create an anchor-only group when every selected
-        // target is already an existing group's anchor.
-        let existingAnchorIds = Set(tabManager.workspaceGroups.map(\.anchorWorkspaceId))
-        let eligibleIds: [UUID] = candidateIds.filter { id in
-            tabManager.tabs.contains(where: { $0.id == id }) && !existingAnchorIds.contains(id)
+        let selectedIds = tabManager.sidebarSelectedWorkspaceIds
+        guard selectedIds.count >= 2 else { return false }
+
+        var seenContainerIds = Set<UUID>()
+        let containerIds = tabManager.tabs.compactMap { workspace -> UUID? in
+            guard selectedIds.contains(workspace.id),
+                  let containerId = workspace.workspaceContainerId,
+                  seenContainerIds.insert(containerId).inserted else {
+                return nil
+            }
+            return containerId
         }
-        guard eligibleIds.count >= 2 else {
-            // Don't consume the event — let it propagate to the next handler
-            // (e.g. toggleReactGrab on the default Cmd+Shift+G binding) so
-            // the user gets the next-best action instead of a dead key. The
-            // shortcut contract is "multi-select then ⌘⇧G"; single-workspace
-            // groups are only created from the right-click context menu, so
-            // a 2-row sidebar selection where only one survives the
-            // pinned/anchor filter should also fall through.
+        guard containerIds.count >= 2,
+              let groupId = tabManager.createWorkspaceGroup(name: "") else {
             return false
         }
-        // No name prompt: TabManager auto-names ("Group N"). Rename via the
-        // header context menu.
-        tabManager.createWorkspaceGroup(name: "", childWorkspaceIds: eligibleIds)
+        for (index, containerId) in containerIds.enumerated() {
+            tabManager.moveWorkspaceContainer(containerId: containerId, toGroup: groupId, toIndex: index)
+        }
         return true
     }
 
@@ -15375,9 +15737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
     }
 
-    /// Public entry for the sidebar group `+` right-click context menu: runs a
-    /// resolved configured action and, on success for "new workspace" style
-    /// builtIns, joins the newly-created workspace to the given group.
+    /// Public entry for the sidebar group `+` menu.
     @discardableResult
     func runWorkspaceGroupConfiguredAction(
         _ action: CmuxResolvedConfigAction,
@@ -15387,118 +15747,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let context = mainWindowContexts.values.first(where: { $0.tabManager === tabManager }) else {
             return false
         }
-        let anchorId = tabManager.workspaceGroups.first { $0.id == groupId }?.anchorWorkspaceId
-        let groupPlacement: WorkspaceGroupNewPlacement = {
-            let cwd = anchorId.flatMap { id in
-                tabManager.tabs.first(where: { $0.id == id })?.currentDirectory
-            }
-            let configured = context.cmuxConfigStore?.resolveWorkspaceGroupConfig(forCwd: cwd)?.newWorkspacePlacement
-            return configured
-                ?? UserDefaultsSettingsClient(defaults: .standard).value(for: SettingCatalog().workspaceGroups.newWorkspacePlacement)
-        }()
-        // Short-circuit the built-in `newWorkspace` action: it must go through
-        // createWorkspaceInGroup so the new workspace inherits the anchor's
-        // cwd and honors the group's configured placement, matching
-        // the bare `+` button. The generic executor below uses addWorkspace()
-        // which skips both behaviors.
         if case .builtIn(.newWorkspace) = action.action {
-            return tabManager.createWorkspaceInGroup(
-                groupId: groupId,
-                placement: groupPlacement,
-                referenceWorkspaceId: anchorId
-            ) != nil
-        }
-        // Snapshot tab ids BEFORE the action fires so the onExecuted callback
-        // (which runs after any confirmation/authorization flow completes) can
-        // diff against the pre-action state and join the newly-created
-        // workspace to the group. The previous post-call diff missed actions
-        // gated on a first-run trust prompt because the workspace doesn't
-        // exist until the user grants permission.
-        let beforeIds = Set(tabManager.tabs.map(\.id))
-        // Group menu actions should run as if the anchor were the active
-        // workspace: the executor derives the new workspace's cwd from
-        // `context.tabManager.selectedWorkspace`, and a group menu item is
-        // conceptually scoped to the anchor's cwd (that's how it was matched
-        // in `workspaceGroups.byCwd` in the first place). Temporarily switch
-        // selection to the anchor for the duration of the action; if the user
-        // had a different workspace focused before, restore it once the
-        // action's onExecuted fires. Skipped when no action workspace was
-        // created so we don't strand selection on the anchor.
-        let previousSelectedId = tabManager.selectedTabId
-        if let anchorId, anchorId != previousSelectedId,
-           tabManager.tabs.contains(where: { $0.id == anchorId }) {
-            tabManager.selectedTabId = anchorId
-        }
-        var asyncObserverId: UUID?
-        let onExecuted: () -> Void = { [weak tabManager, groupId, beforeIds, previousSelectedId, anchorId, groupPlacement, action] in
-            guard let tabManager else { return }
-            let afterIds = tabManager.tabs.map(\.id)
-            var newlyCreatedId: UUID?
-            for id in afterIds where !beforeIds.contains(id) {
-                tabManager.addWorkspaceToGroup(
-                    workspaceId: id,
-                    groupId: groupId,
-                    placement: groupPlacement,
-                    referenceWorkspaceId: anchorId
-                )
-                newlyCreatedId = id
-                break
-            }
-            // cloudVM launches a `cmux vm base open` process and returns before the
-            // workspace appears in tabs[]. The synchronous diff above misses
-            // it, so watch the tab list while the process is running. Process
-            // completion also reports the created workspace UUID as an exact
-            // fallback.
-            if newlyCreatedId == nil, case .builtIn(.cloudVM) = action.action {
-                asyncObserverId = ConfiguredGroupActionAsyncWorkspaceObserver.install(
-                    tabManager: tabManager,
-                    groupId: groupId,
-                    knownIds: Set(afterIds),
-                    placement: groupPlacement,
-                    referenceWorkspaceId: anchorId
-                )
-            }
-            // Restore the prior selection if the action didn't create a new
-            // workspace (the gesture wasn't "go work in the new one") and
-            // the previous selection still exists. When a new workspace was
-            // created, leave it focused — that matches what the equivalent
-            // bare `+` button does.
-            if newlyCreatedId == nil,
-               let previousSelectedId,
-               previousSelectedId != tabManager.selectedTabId,
-               tabManager.tabs.contains(where: { $0.id == previousSelectedId }) {
-                tabManager.selectedTabId = previousSelectedId
-            }
-        }
-        let onCloudVMCompletion: (CloudVMActionLauncher.Completion) -> Void = { [weak tabManager] completion in
-            guard let tabManager, let asyncObserverId else { return }
-            ConfiguredGroupActionAsyncWorkspaceObserver.finishPending(
+            return chooseWorkspaceRoot(
+                forGroup: groupId,
                 tabManager: tabManager,
-                observerId: asyncObserverId,
-                workspaceId: completion.succeeded ? completion.workspaceId : nil
+                preferredWindow: resolvedWindow(for: context),
+                rollbackEmptyGroupOnFailure: false
             )
         }
-        let didRun = executeConfiguredCmuxAction(
+        return executeConfiguredCmuxAction(
             action,
             context: context,
-            preferredWindow: resolvedWindow(for: context),
-            onExecuted: onExecuted,
-            onCloudVMCompletion: onCloudVMCompletion
+            preferredWindow: resolvedWindow(for: context)
         )
-        // executeConfiguredCmuxAction returns false when the action couldn't
-        // start at all (unresolved action ref, missing target terminal, etc.).
-        // In that case onExecuted will never fire, so restore the prior
-        // selection here. The trust-prompt-cancelled window (action returns
-        // true but the user later cancels) leaves selection on the anchor
-        // until the user clicks something else; tradeoff documented at the
-        // call site.
-        if !didRun,
-           let previousSelectedId,
-           previousSelectedId != tabManager.selectedTabId,
-           tabManager.tabs.contains(where: { $0.id == previousSelectedId }) {
-            tabManager.selectedTabId = previousSelectedId
-        }
-        return didRun
     }
 
     func executeConfiguredCmuxAction(
@@ -15512,9 +15773,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case .builtIn(let builtIn):
             switch builtIn {
             case .newWorkspace:
-                context.tabManager.addWorkspace()
-                onExecuted?()
-                return true
+                let didStart = performNewWorkspaceAction(
+                    tabManager: context.tabManager,
+                    debugSource: "configured.newWorkspace"
+                )
+                if didStart { onExecuted?() }
+                return didStart
             case .newAgentChat: return performConfiguredNewAgentChatAction(context: context, preferredWindow: preferredWindow, onExecuted: onExecuted)
             case .cloudVM:
                 let didStart = performCloudVMAction(

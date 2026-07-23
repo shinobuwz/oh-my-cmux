@@ -6,10 +6,15 @@ public import Foundation
 /// Mirrors the app target's `WorkspaceGroup` (plus its computed membership)
 /// without the package importing the app target. The coordinator turns each
 /// snapshot into the `workspace.group.*` group payload, minting the
-/// `workspace_group` / `workspace` refs itself (the legacy
-/// `v2WorkspaceGroupPayload` did the minting inline).
 public struct ControlWorkspaceGroupSnapshot: Sendable, Equatable {
-    /// The group's stable identifier.
+    /// A read-only snapshot of one workspace group, as the app target exposes it to
+    /// ``ControlCommandCoordinator`` through ``ControlWorkspaceGroupContext``.
+    ///
+    /// Mirrors the app target's `WorkspaceGroup` (plus its computed membership)
+    /// without the package importing the app target. The coordinator turns each
+    /// snapshot into the `workspace.group.*` group payload, minting the
+    /// `workspace_group` / `workspace` refs itself (the legacy
+    /// `v2WorkspaceGroupPayload` did the minting inline).
     public let id: UUID
     /// The group's display name.
     public let name: String
@@ -17,8 +22,9 @@ public struct ControlWorkspaceGroupSnapshot: Sendable, Equatable {
     public let isCollapsed: Bool
     /// Whether the group is pinned.
     public let isPinned: Bool
-    /// The anchor workspace's identifier.
-    public let anchorWorkspaceID: UUID
+    /// The last active descendant workspace used when the group header is
+    /// selected. `nil` for a freshly created empty group.
+    public let lastActiveWorkspaceID: UUID?
     /// The group's custom color override, if any.
     public let customColor: String?
     /// The group's custom icon symbol, if any.
@@ -33,7 +39,7 @@ public struct ControlWorkspaceGroupSnapshot: Sendable, Equatable {
     ///   - name: The group's display name.
     ///   - isCollapsed: Whether the group is collapsed.
     ///   - isPinned: Whether the group is pinned.
-    ///   - anchorWorkspaceID: The anchor workspace's identifier.
+    ///   - lastActiveWorkspaceID: The last active descendant workspace, if any.
     ///   - customColor: The custom color override, if any.
     ///   - iconSymbol: The custom icon symbol, if any.
     ///   - memberWorkspaceIDs: The member workspace identifiers, in tab order.
@@ -42,7 +48,7 @@ public struct ControlWorkspaceGroupSnapshot: Sendable, Equatable {
         name: String,
         isCollapsed: Bool,
         isPinned: Bool,
-        anchorWorkspaceID: UUID,
+        lastActiveWorkspaceID: UUID?,
         customColor: String?,
         iconSymbol: String?,
         memberWorkspaceIDs: [UUID]
@@ -51,7 +57,7 @@ public struct ControlWorkspaceGroupSnapshot: Sendable, Equatable {
         self.name = name
         self.isCollapsed = isCollapsed
         self.isPinned = isPinned
-        self.anchorWorkspaceID = anchorWorkspaceID
+        self.lastActiveWorkspaceID = lastActiveWorkspaceID
         self.customColor = customColor
         self.iconSymbol = iconSymbol
         self.memberWorkspaceIDs = memberWorkspaceIDs

@@ -74,6 +74,13 @@ struct SidebarWorkspaceSnapshotFactory {
             )
         }
         let checklistProgress = workspace.checklistProgressSummary
+        let isWorktreeBindingBroken: Bool = {
+            guard workspace.workspaceLeafRole == .managed || workspace.workspaceLeafRole == .external else {
+                return workspace.isWorktreeBindingBroken
+            }
+            guard let root = workspace.boundRootPath, !root.isEmpty else { return true }
+            return workspace.isWorktreeBindingBroken || !FileManager.default.fileExists(atPath: root)
+        }()
 
         return SidebarWorkspaceSnapshotBuilder.Snapshot(
             presentationKey: presentationKey,
@@ -110,6 +117,7 @@ struct SidebarWorkspaceSnapshotFactory {
             pullRequestRows: pullRequestRows,
             listeningPorts: detailVisibility.showsPorts ? workspace.listeningPorts : [],
             finderDirectoryPath: WorkspaceFinderDirectoryResolver.path(for: workspace),
+            isWorktreeBindingBroken: isWorktreeBindingBroken,
             mediaActivity: workspace.browserMediaActivity,
             taskStatus: taskStatusResolution?.effective,
             todoStatusMenuModel: todoStatusMenuModel,

@@ -123,6 +123,24 @@ extension Workspace {
         let gitBranchSnapshot = gitBranch.map { branch in
             SessionGitBranchSnapshot(branch: branch.branch, isDirty: branch.isDirty)
         }
+        let worktreeHeadBranch: String?
+        let worktreeHeadDetachedCommitish: String?
+        let worktreeHeadIsDetached: Bool
+        switch workspaceLeafHead {
+        case .branch(let branch):
+            worktreeHeadBranch = branch
+            worktreeHeadDetachedCommitish = nil
+            worktreeHeadIsDetached = false
+        case .detached(let commitish):
+            worktreeHeadBranch = nil
+            worktreeHeadDetachedCommitish = commitish
+            worktreeHeadIsDetached = true
+        case nil:
+            worktreeHeadBranch = nil
+            worktreeHeadDetachedCommitish = nil
+            worktreeHeadIsDetached = false
+        }
+        
         let notificationStore = AppDelegate.shared?.notificationStore
         let isWorkspaceManuallyUnread = notificationStore?.hasManualUnread(forTabId: id) ?? false
         let hasWorkspaceUnreadIndicator =
@@ -139,7 +157,15 @@ extension Workspace {
             customDescription: customDescription,
             customColor: customColor,
             isPinned: isPinned,
-            groupId: groupId,
+            groupId: workspaceContainerId,
+            boundRootPath: boundRootPath,
+            isManagedWorktree: isManagedWorktree,
+            managedWorktreeBranch: managedWorktreeBranch,
+            workspaceLeafRole: workspaceLeafRole.rawValue,
+            worktreeHeadBranch: worktreeHeadBranch,
+            worktreeHeadDetachedCommitish: worktreeHeadDetachedCommitish,
+            worktreeHeadIsDetached: worktreeHeadIsDetached,
+            isWorktreeBindingBroken: isWorktreeBindingBroken,
             isManuallyUnread: isWorkspaceManuallyUnread,
             hasUnreadIndicator: hasWorkspaceUnreadIndicator,
             notifications: workspaceNotificationSnapshots.isEmpty ? nil : workspaceNotificationSnapshots,
@@ -244,7 +270,22 @@ extension Workspace {
         setCustomDescription(snapshot.customDescription)
         setCustomColor(snapshot.customColor)
         isPinned = snapshot.isPinned
-        groupId = snapshot.groupId
+        workspaceContainerId = snapshot.groupId
+        boundRootPath = snapshot.boundRootPath
+        isManagedWorktree = snapshot.isManagedWorktree ?? false
+        managedWorktreeBranch = snapshot.managedWorktreeBranch
+        workspaceLeafRole = snapshot.workspaceLeafRole.flatMap(WorkspaceLeafRole.init(rawValue:))
+            ?? ((snapshot.isManagedWorktree ?? false) ? .managed : .compatibility)
+        if let branch = snapshot.worktreeHeadBranch {
+            workspaceLeafHead = .branch(branch)
+        } else if snapshot.worktreeHeadIsDetached == true {
+            workspaceLeafHead = .detached(commitish: snapshot.worktreeHeadDetachedCommitish)
+        } else if let legacyBranch = snapshot.managedWorktreeBranch, snapshot.isManagedWorktree == true {
+            workspaceLeafHead = .branch(legacyBranch)
+        } else {
+            workspaceLeafHead = nil
+        }
+        isWorktreeBindingBroken = snapshot.isWorktreeBindingBroken ?? false
         restoreTodoState(from: snapshot)
 
         // Status entries and agent PIDs are ephemeral runtime state tied to running
@@ -2075,9 +2116,30 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var customTitleSource: CustomTitleSource?
     @Published var customDescription: String?
     @Published var isPinned: Bool = false
-    /// Identifier of the WorkspaceGroup this workspace belongs to, or nil if ungrouped.
-    /// The group entity itself lives in `TabManager.workspaceGroups`.
-    @Published var groupId: UUID?
+    /// Identifier of the second-level ``WorkspaceContainer`` that owns this leaf.
+    /// The container entity itself lives in `TabManager.workspaceContainers`.
+    @Published var workspaceContainerId: UUID?
+    /// Immutable root bound to this leaf; shell directory changes never mutate it.
+    @Published var boundRootPath: String? = nil
+    /// `true` only for linked worktrees created and removable by cmux.
+    @Published var isManagedWorktree: Bool = false
+    /// Branch retained after filesystem loss so a managed worktree can be recreated.
+    @Published var managedWorktreeBranch: String? = nil
+    /// Stable structural role assigned when the leaf enters a container.
+    @Published var workspaceLeafRole: WorkspaceLeafRole = .compatibility
+    /// Branch or detached commit identity last resolved for this Git worktree.
+    @Published var workspaceLeafHead: WorkspaceLeafHead? = nil
+    /// Missing/corrupt state refreshed by root registration and recovery actions.
+    @Published var isWorktreeBindingBroken: Bool = false
+
+    var leafBinding: WorkspaceLeafBinding {
+        WorkspaceLeafBinding(
+            role: workspaceLeafRole,
+            worktreeRootPath: boundRootPath,
+            head: workspaceLeafHead,
+            isBroken: isWorktreeBindingBroken
+        )
+    }
     @Published var customColor: String?  // hex string, e.g. "#C0392B"
     /// User-defined environment variables applied to every shell spawned in this
     /// workspace: the initial terminal, every later pane/surface/split, and every
@@ -3448,6 +3510,8 @@ final class Workspace: Identifiable, ObservableObject {
 
     /// User-initiated close attempts, distinct from internal close/move flows.
     private var explicitUserCloseTabIds: Set<TabID> = []
+    /// Last-surface closes that should leave a managed workspace as a dormant sidebar leaf.
+    private var pendingDormantCloseTabIds: Set<TabID> = []
     private var closeHistoryEligibleTabIds: Set<TabID> = []
     private var closeHistoryEligiblePanelIds: Set<UUID> = []
     private var suppressClosedPanelHistory = false
@@ -9683,6 +9747,22 @@ final class Workspace: Identifiable, ObservableObject {
         return newPanel
     }
 
+    /// Recreates the default terminal when a dormant sidebar leaf is activated.
+    @discardableResult
+    func activateDormantWorkspaceIfNeeded() -> Bool {
+        guard workspaceContainerId != nil, panels.isEmpty else { return false }
+        let replacement = createReplacementTerminalPanel()
+        if let replacementTabId = surfaceIdFromPanelId(replacement.id),
+           let replacementPane = bonsplitController.allPaneIds.first {
+            bonsplitController.focusPane(replacementPane)
+            bonsplitController.selectTab(replacementTabId)
+            applyTabSelection(tabId: replacementTabId, inPane: replacementPane)
+        }
+        scheduleTerminalGeometryReconcile()
+        scheduleFocusReconcile()
+        return true
+    }
+
     /// Check if any panel needs close confirmation
     func needsConfirmClose() -> Bool {
         for (panelId, _) in panels {
@@ -11721,7 +11801,12 @@ extension Workspace: BonsplitDelegate {
             return false
         }
 
-        if explicitUserClose && shouldCloseWorkspaceOnLastSurface(for: tab.id, tabStripClose: tabStripClose) {
+        let shouldBecomeDormant = explicitUserClose
+            && workspaceContainerId != nil
+            && shouldCloseWorkspaceOnLastSurface(for: tab.id, tabStripClose: tabStripClose)
+        if explicitUserClose,
+           !shouldBecomeDormant,
+           shouldCloseWorkspaceOnLastSurface(for: tab.id, tabStripClose: tabStripClose) {
             clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
             clearCloseHistoryEligibility(tabId: tab.id)
             if tabCloseButtonClose == true {
@@ -11778,6 +11863,9 @@ extension Workspace: BonsplitDelegate {
                         self.clearCloseHistoryEligibility(tabId: tabId)
                         return
                     }
+                    if shouldBecomeDormant {
+                        self.pendingDormantCloseTabIds.insert(tabId)
+                    }
 
                     self.forceCloseTabIds.insert(tabId)
                     self.bonsplitController.closeTab(tabId)
@@ -11792,6 +11880,9 @@ extension Workspace: BonsplitDelegate {
         } else {
             clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
         }
+        if shouldBecomeDormant {
+            pendingDormantCloseTabIds.insert(tab.id)
+        }
         recordPostCloseState()
         return true
     }
@@ -11801,6 +11892,7 @@ extension Workspace: BonsplitDelegate {
         tabStripCloseButtonByTabId.removeValue(forKey: tabId)
         let remoteTmuxWorkspaceCloseButton = remoteTmuxWorkspaceCloseButtonByTabId.removeValue(forKey: tabId)
         let remoteTmuxKeepWorkspaceOpen = remoteTmuxKeepWorkspaceOpenTabIds.remove(tabId) != nil
+        let shouldBecomeDormant = pendingDormantCloseTabIds.remove(tabId) != nil
         if remoteTmuxKeepWorkspaceOpen, remoteTmuxKeepWorkspaceOpenTabIds.isEmpty { remoteTmuxKeepWorkspaceOpenAfterSessionEnd = false }
         let selectTabId = postCloseSelectTabId.removeValue(forKey: tabId)
         let shouldClearSplitZoom = postCloseClearSplitZoomTabIds.remove(tabId) != nil
@@ -11924,6 +12016,11 @@ extension Workspace: BonsplitDelegate {
                 detachRemoteTmuxMirrorKeptOpenLocallyIfNeeded()
             }
 
+            if shouldBecomeDormant {
+                pendingRemoteDisconnectReplacementsBySurfaceId.removeValue(forKey: panelId)
+                scheduleTerminalGeometryReconcile()
+                return
+            }
             #if DEBUG
             dlog("replacement.remoteDisconnect.fire target=\(pendingRemoteDisconnectReplacementsBySurfaceId[panelId]?.target ?? "nil")")
             #endif

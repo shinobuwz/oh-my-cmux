@@ -20,6 +20,124 @@ extension TerminalController {
         return (trimmed as NSString).expandingTildeInPath
     }
 
+    private enum WorkspaceNewWorktreeOutcome: Sendable {
+        case created(workspaceID: UUID, containerID: UUID, path: String?)
+        case failed(code: String, message: String)
+    }
+
+    nonisolated func v2WorkspaceNewWorktree(params: [String: Any]) -> V2CallResult {
+        guard let rawBranch = params["branch"] as? String else {
+            return .err(code: "invalid_params", message: "Missing branch", data: nil)
+        }
+        let branch = rawBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branch.isEmpty else {
+            return .err(code: "invalid_params", message: "Branch must not be empty", data: nil)
+        }
+
+        let rawContainerID = params["container_id"] as? String
+        let rawWorkspaceID = params["workspace_id"] as? String
+        let rawWindowID = params["window_id"] as? String
+        if let rawContainerID, UUID(uuidString: rawContainerID) == nil {
+            return .err(code: "invalid_params", message: "container_id must be a UUID", data: nil)
+        }
+        if let rawWorkspaceID, UUID(uuidString: rawWorkspaceID) == nil {
+            return .err(code: "invalid_params", message: "workspace_id must be a UUID", data: nil)
+        }
+        if let rawWindowID, UUID(uuidString: rawWindowID) == nil {
+            return .err(code: "invalid_params", message: "window_id must be a UUID", data: nil)
+        }
+
+        let requestedFocus = params["focus"] as? Bool ?? false
+        let focus = requestedFocus && Self.socketCommandAllowsInAppFocusMutations()
+        let outcome: WorkspaceNewWorktreeOutcome? = socketAwaitCallback(timeout: 120) { finish in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    finish(.failed(code: "unavailable", message: "Workspace context is unavailable"))
+                    return
+                }
+                var routingParams: [String: Any] = [:]
+                if let rawWorkspaceID { routingParams["workspace_id"] = rawWorkspaceID }
+                if let rawWindowID { routingParams["window_id"] = rawWindowID }
+                guard let tabManager = self.v2ResolveTabManager(params: routingParams) else {
+                    finish(.failed(code: "unavailable", message: "Workspace context is unavailable"))
+                    return
+                }
+                let containerID = rawContainerID.flatMap(UUID.init(uuidString:))
+                    ?? rawWorkspaceID.flatMap(UUID.init(uuidString:)).flatMap { workspaceID in
+                        tabManager.tabs.first(where: { $0.id == workspaceID })?.workspaceContainerId
+                    }
+                    ?? tabManager.selectedWorkspace?.workspaceContainerId
+                guard let containerID else {
+                    finish(.failed(code: "not_found", message: "Workspace container not found"))
+                    return
+                }
+                do {
+                    let workspace = try await tabManager.createManagedWorktree(
+                        inContainer: containerID,
+                        branch: branch,
+                        select: focus
+                    )
+                    finish(.created(
+                        workspaceID: workspace.id,
+                        containerID: containerID,
+                        path: workspace.boundRootPath
+                    ))
+                } catch let error as ManagedWorktreeMutationError {
+                    let failure = Self.workspaceNewWorktreeFailure(error)
+                    finish(.failed(code: failure.code, message: failure.message))
+                } catch {
+                    finish(.failed(code: "creation_failed", message: "Worktree creation failed"))
+                }
+            }
+        }
+
+        guard let outcome else {
+            return .err(code: "timeout", message: "Worktree creation timed out", data: nil)
+        }
+        switch outcome {
+        case let .created(workspaceID, containerID, path):
+            return .ok([
+                "workspace_id": workspaceID.uuidString,
+                "container_id": containerID.uuidString,
+                "path": v2OrNull(path),
+                "focused": focus,
+            ])
+        case let .failed(code, message):
+            return .err(code: code, message: message, data: nil)
+        }
+    }
+
+    private nonisolated static func workspaceNewWorktreeFailure(
+        _ error: ManagedWorktreeMutationError
+    ) -> (code: String, message: String) {
+        switch error {
+        case .missingContainer:
+            return ("not_found", "Workspace container not found")
+        case .notGitContainer:
+            return ("not_git", "Workspace does not support Git worktrees")
+        case .unbornRepository:
+            return ("unborn_repository", "The repository needs an initial commit before creating a worktree")
+        case .mainWorktree:
+            return ("main_worktree", "The main worktree cannot be replaced")
+        case .unmanagedWorktree:
+            return ("unmanaged_worktree", "The worktree is not managed by cmux")
+        case .missingManagedBranch:
+            return ("missing_branch", "The managed worktree branch is missing")
+        case .crossWindowReference:
+            return ("in_use", "The worktree is open in another window")
+        case .git(let gitError):
+            switch gitError {
+            case .invalidBranchName(let name):
+                return ("invalid_branch", "Invalid branch name: \(name)")
+            case .filesystemFailure(let operation, let detail):
+                return ("filesystem_failed", "\(operation): \(detail)")
+            case .commandFailed(let command, _, let stderr):
+                let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                return ("git_failed", detail.isEmpty ? "\(command) failed" : detail)
+            }
+        }
+    }
+
     // Shared workspace-create implementation: the workspace.create command moved
     // to ControlCommandCoordinator, but v2MobileWorkspaceCreate still drives
     // this body for the mobile data-plane create path.
@@ -118,13 +236,23 @@ extension TerminalController {
                     baseCwd: execution.workingDirectory ?? ws.currentDirectory
                 )
             }
-            if let groupID = execution.groupID {
-                tabManager.addWorkspaceToGroup(
-                    workspaceId: ws.id,
-                    groupId: groupID,
-                    placement: execution.groupPlacement ?? .top,
-                    referenceWorkspaceId: execution.groupReferenceWorkspaceID
-                )
+            if let groupID = execution.groupID,
+               let containerID = ws.workspaceContainerId {
+                let targetContainers = tabManager.workspaceContainers.filter { $0.groupId == groupID }
+                let targetIndex: Int
+                switch execution.groupPlacement ?? .top {
+                case .top:
+                    targetIndex = 0
+                case .end:
+                    targetIndex = targetContainers.count
+                case .afterCurrent:
+                    targetIndex = execution.groupReferenceWorkspaceID
+                        .flatMap { referenceID in tabManager.tabs.first(where: { $0.id == referenceID })?.workspaceContainerId }
+                        .flatMap { referenceContainerID in targetContainers.firstIndex(where: { $0.id == referenceContainerID }) }
+                        .map { $0 + 1 }
+                        ?? targetContainers.count
+                }
+                tabManager.moveWorkspaceContainer(containerId: containerID, toGroup: groupID, toIndex: targetIndex)
             }
             newWorkspace = ws
         }
@@ -146,7 +274,9 @@ extension TerminalController {
         windowID: UUID?
     ) -> V2CallResult {
         let workspaceID = workspace.id
-        let groupID = workspace.groupId
+        let groupID = workspace.workspaceContainerId.flatMap { containerID in
+            workspace.owningTabManager?.workspaceContainers.first(where: { $0.id == containerID })?.groupId
+        }
         let surfaceID = workspace.focusedPanelId
         return .ok([
             "window_id": v2OrNull(windowID?.uuidString),

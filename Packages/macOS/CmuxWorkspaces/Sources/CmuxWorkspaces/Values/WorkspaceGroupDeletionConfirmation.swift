@@ -1,37 +1,40 @@
 public import Foundation
 
 /// Current workspace-group membership used to confirm destructive group deletion.
+///
+/// In the normalized hierarchy a group owns containers, and containers own
+/// leaves; destructive deletion closes every leaf under the group's
+/// containers. Confirmation copy therefore represents the group's containers
+/// rather than a hidden anchor workspace.
 public struct WorkspaceGroupDeletionConfirmation: Equatable, Sendable {
     /// The group's stable identity.
     public let groupId: UUID
     /// The group's current display name.
     public let groupName: String
-    /// The workspace represented by the group header.
-    public let anchorWorkspaceId: UUID
-    /// Whether ``memberWorkspaceIds`` includes the anchor workspace.
-    public let includesAnchorWorkspace: Bool
-    /// Workspace identifiers that destructive deletion will close, in window order.
+    /// The group's containers in sidebar order, at confirmation time.
+    public let containerIds: [UUID]
+    /// Leaf identifiers that destructive deletion will close, in window order.
     public let memberWorkspaceIds: [UUID]
 
-    /// Number of workspaces that destructive deletion would close.
+    /// Number of containers under the group.
+    public var containerCount: Int { containerIds.count }
+
+    /// Number of leaves destructive deletion would close.
     public var memberCount: Int { memberWorkspaceIds.count }
 
-    /// Number of child workspaces inside the group, excluding the group header workspace.
-    public var containedWorkspaceCount: Int {
-        max(memberWorkspaceIds.count - (includesAnchorWorkspace ? 1 : 0), 0)
-    }
+    /// Whether the group has no containers and therefore no leaves to close.
+    public var isEmpty: Bool { containerIds.isEmpty }
 
-    init(
+    /// Creates a deletion confirmation snapshot.
+    public init(
         groupId: UUID,
         groupName: String,
-        anchorWorkspaceId: UUID,
-        includesAnchorWorkspace: Bool,
+        containerIds: [UUID],
         memberWorkspaceIds: [UUID]
     ) {
         self.groupId = groupId
         self.groupName = groupName
-        self.anchorWorkspaceId = anchorWorkspaceId
-        self.includesAnchorWorkspace = includesAnchorWorkspace
+        self.containerIds = containerIds
         self.memberWorkspaceIds = memberWorkspaceIds
     }
 }

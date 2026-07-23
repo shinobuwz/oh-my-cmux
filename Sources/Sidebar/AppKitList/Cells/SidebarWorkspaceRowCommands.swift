@@ -61,23 +61,13 @@ struct SidebarWorkspaceRowCommands {
         if isShift, let anchorIndex = shiftAnchorIndex {
             let lower = min(anchorIndex, index)
             let upper = max(anchorIndex, index)
-            // Filter out workspaces hidden inside collapsed groups so a
-            // Shift-click range never silently includes rows the user
-            // can't see.
-            let collapsedGroupIds: Set<UUID> = Set(
-                tabManager.workspaceGroups
-                    .filter { $0.isCollapsed }
-                    .map(\.id)
-            )
-            let anchorIdsByGroup: [UUID: UUID] = Dictionary(
-                uniqueKeysWithValues: tabManager.workspaceGroups.map { ($0.id, $0.anchorWorkspaceId) }
-            )
+            let collapsedGroupIds = Set(tabManager.workspaceGroups.filter(\.isCollapsed).map(\.id))
+            let collapsedContainerIds = Set(tabManager.workspaceContainers.filter {
+                collapsedGroupIds.contains($0.groupId) || $0.isCollapsed
+            }.map(\.id))
             let rangeIds = tabManager.tabs[lower...upper].compactMap { tab -> UUID? in
-                if let gid = tab.groupId,
-                   collapsedGroupIds.contains(gid),
-                   anchorIdsByGroup[gid] != tab.id {
-                    return nil
-                }
+                guard let containerId = tab.workspaceContainerId,
+                      !collapsedContainerIds.contains(containerId) else { return nil }
                 return tab.id
             }
             if isCommand {
@@ -297,6 +287,7 @@ struct SidebarWorkspaceRowMenuBuilder {
 
         addPinItem(to: menu, tabManager: tabManager)
         addGroupSection(to: menu, tabManager: tabManager)
+        addWorktreeSection(to: menu, tabManager: tabManager)
         menu.addItem(.separator())
         addTodoSection(to: menu, tabManager: tabManager)
         menu.addItem(.separator())
@@ -355,76 +346,51 @@ struct SidebarWorkspaceRowMenuBuilder {
             commands.syncSelectionAfterMutation()
         })
     }
+    private func isBrokenWorktreeForMenu() -> Bool {
+        commands.snapshotProvider()?.isWorktreeBindingBroken
+            ?? (tab.isWorktreeBindingBroken || tab.boundRootPath.map { !FileManager.default.fileExists(atPath: $0) } ?? true)
+    }
+    private func addWorktreeSection(to menu: NSMenu, tabManager: TabManager) {
+        switch tab.workspaceLeafRole {
+        case .external:
+            menu.addItem(item(
+                String(localized: "workspaceLeaf.removeWorktree", defaultValue: "Remove Worktree")
+            ) { [weak tabManager, workspaceId = tab.id] in
+                guard let tabManager else { return }
+                _ = AppDelegate.shared?.requestDeleteWorktree(workspaceId: workspaceId, tabManager: tabManager, preferredWindow: NSApp.keyWindow)
+            })
+        case .managed:
+            menu.addItem(item(
+                String(localized: "workspaceLeaf.deleteWorktree", defaultValue: "Delete Worktree")
+            ) { [weak tabManager, workspaceId = tab.id] in
+                guard let tabManager else { return }
+                _ = AppDelegate.shared?.requestDeleteWorktree(workspaceId: workspaceId, tabManager: tabManager, preferredWindow: NSApp.keyWindow)
+            })
+            if isBrokenWorktreeForMenu() {
+                menu.addItem(item(
+                    String(localized: "workspaceLeaf.recreateWorktree", defaultValue: "Recreate Worktree")
+                ) { [weak tabManager, workspaceId = tab.id] in
+                    guard let tabManager else { return }
+                    _ = AppDelegate.shared?.requestRecreateWorktree(workspaceId: workspaceId, tabManager: tabManager, preferredWindow: NSApp.keyWindow)
+                })
+            }
+        case .main, .compatibility:
+            return
+        }
+        menu.addItem(.separator())
+    }
 
     private func addGroupSection(to menu: NSMenu, tabManager: TabManager) {
-        let newGroupShortcut = KeyboardShortcutSettings.shortcut(for: .newWorkspaceGroup)
-        let canCreateEmpty = tabManager.selectedTab?.isRemoteTmuxMirror != true
+        let shortcut = KeyboardShortcutSettings.shortcut(for: .newWorkspaceGroup)
+        let canCreateGroup = tabManager.selectedTab?.isRemoteTmuxMirror != true
         menu.addItem(item(
-            String(localized: "contextMenu.workspaceGroup.newEmpty", defaultValue: "New Empty Workspace Group"),
-            enabled: canCreateEmpty,
-            shortcut: newGroupShortcut
+            String(localized: "contextMenu.workspaceGroup.new", defaultValue: "New Workspace Group"),
+            enabled: canCreateGroup,
+            shortcut: shortcut
         ) { [weak tabManager] in
             guard let tabManager else { return }
             _ = AppDelegate.shared?.createEmptyWorkspaceGroup(tabManager: tabManager)
         })
-
-        let targetWorkspaces = targetIds.compactMap { id in
-            tabManager.tabs.first(where: { $0.id == id })
-        }
-        let existingAnchorIds = Set(tabManager.workspaceGroups.map(\.anchorWorkspaceId))
-        let eligibleTargets = targetWorkspaces.filter { !existingAnchorIds.contains($0.id) }
-        let eligibleTargetIds = eligibleTargets.map(\.id)
-        guard !eligibleTargetIds.isEmpty else { return }
-
-        let groups = commands.workspaceGroupMenuSnapshot.items
-        let moveToGroupMenuState = WorkspaceGroupMoveToMenuState(groups: groups)
-        let allTargetsInSameGroup: UUID? = {
-            let groupIds = eligibleTargets.map(\.groupId)
-            guard let first = groupIds.first, groupIds.allSatisfy({ $0 == first }) else { return nil }
-            return first
-        }()
-        let hasAnyGroupedTarget = eligibleTargets.contains { $0.groupId != nil }
-
-        let groupSelectedLabel = isMulti
-            ? String(localized: "contextMenu.workspaceGroup.newFromSelection", defaultValue: "New Group from Selection")
-            : String(localized: "contextMenu.workspaceGroup.newFromWorkspace", defaultValue: "New Group from Workspace")
-        menu.addItem(item(
-            groupSelectedLabel,
-            shortcut: KeyboardShortcutSettings.shortcut(for: .groupSelectedWorkspaces)
-        ) { [weak tabManager] in
-            guard let tabManager, !eligibleTargetIds.isEmpty else { return }
-            tabManager.createWorkspaceGroup(name: "", childWorkspaceIds: eligibleTargetIds)
-        })
-
-        let moveToGroupLabel = String(localized: "contextMenu.workspaceGroup.moveTo", defaultValue: "Move to Group")
-        if moveToGroupMenuState.rendersSubmenu {
-            let submenu = NSMenu()
-            submenu.autoenablesItems = false
-            for group in groups {
-                submenu.addItem(item(group.name, enabled: allTargetsInSameGroup != group.id) { [weak tabManager] in
-                    guard let tabManager else { return }
-                    for id in eligibleTargetIds {
-                        tabManager.addWorkspaceToGroup(workspaceId: id, groupId: group.id)
-                    }
-                })
-            }
-            let parent = item(moveToGroupLabel) {}
-            parent.submenu = submenu
-            menu.addItem(parent)
-        } else {
-            menu.addItem(item(moveToGroupLabel, enabled: false) {})
-        }
-
-        if hasAnyGroupedTarget {
-            menu.addItem(item(
-                String(localized: "contextMenu.workspaceGroup.remove", defaultValue: "Remove from Group")
-            ) { [weak tabManager] in
-                guard let tabManager else { return }
-                for id in eligibleTargetIds {
-                    tabManager.removeWorkspaceFromGroup(workspaceId: id)
-                }
-            })
-        }
     }
 
     private func todoTargetWorkspaces(_ tabManager: TabManager) -> [Workspace] {

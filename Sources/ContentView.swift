@@ -722,6 +722,7 @@ private final class SelectedWorkspaceDirectoryObserver: ObservableObject {
     private struct Snapshot: Equatable {
         let workspaceId: UUID?
         let currentDirectory: String?
+        let boundRootPath: String?
         let remoteConfiguration: WorkspaceRemoteConfiguration?
         let remoteConnectionState: WorkspaceRemoteConnectionState?
         let remoteConnectionDetail: String?
@@ -748,6 +749,7 @@ private final class SelectedWorkspaceDirectoryObserver: ObservableObject {
                         Snapshot(
                             workspaceId: nil,
                             currentDirectory: nil,
+                            boundRootPath: nil,
                             remoteConfiguration: nil,
                             remoteConnectionState: nil,
                             remoteConnectionDetail: nil,
@@ -759,7 +761,8 @@ private final class SelectedWorkspaceDirectoryObserver: ObservableObject {
                     .eraseToAnyPublisher()
                 }
                 let directoryChangeRevision = workspace.currentDirectoryChangeRevisionPublisher()
-                return workspace.$currentDirectory
+                return workspace.$boundRootPath
+                    .combineLatest(workspace.$currentDirectory)
                     .combineLatest(
                         workspace.$remoteConfiguration,
                         workspace.$remoteConnectionState,
@@ -770,22 +773,15 @@ private final class SelectedWorkspaceDirectoryObserver: ObservableObject {
                         workspace.$activeRemoteTerminalSessionCount
                     )
                     .map { values in
-                        let (
-                            previousValues,
-                            remoteDaemonStatus,
-                            activeRemoteTerminalSessionCount
-                        ) = values
-                        let (
-                            currentDirectory,
-                            remoteConfiguration,
-                            remoteConnectionState,
-                            remoteConnectionDetail
-                        ) = previousValues
+                        let (previousValues, remoteDaemonStatus, activeRemoteTerminalSessionCount) = values
+                        let (directoryValues, remoteConfiguration, remoteConnectionState, remoteConnectionDetail) = previousValues
+                        let (boundRootPath, currentDirectory) = directoryValues
                         return Snapshot(
                             workspaceId: workspace.id,
                             currentDirectory: workspace.isRemoteWorkspace
                                 ? workspace.presentedCurrentDirectory
                                 : currentDirectory,
+                            boundRootPath: workspace.isRemoteWorkspace ? nil : boundRootPath,
                             remoteConfiguration: remoteConfiguration,
                             remoteConnectionState: remoteConnectionState,
                             remoteConnectionDetail: remoteConnectionDetail,
@@ -2442,7 +2438,7 @@ struct ContentView: View {
             return
         }
 
-        let dir = tab.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dir = (tab.boundRootPath ?? tab.currentDirectory).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !dir.isEmpty else {
             sessionIndexStore.setCurrentDirectoryIfChanged(nil)
             fileExplorerStore.applyWorkspaceRoot(.none)
@@ -6907,7 +6903,7 @@ struct ContentView: View {
         contributions.append(
             CommandPaletteCommandContribution(
                 commandId: "palette.newWorktree",
-                title: constant(String(localized: "sidebar.extension.createWorktree", defaultValue: "Create worktree")),
+                title: constant(String(localized: "command.newWorktree.title", defaultValue: "New Worktree")),
                 subtitle: constant(String(localized: "command.newWorkspace.subtitle", defaultValue: "Workspace")),
                 keywords: ["create", "new", "worktree", "git", "branch"]
             )
@@ -8142,9 +8138,10 @@ struct ContentView: View {
             )
         }
         registry.register(commandId: "palette.newWorktree") {
-            DispatchQueue.main.async {
-                CmuxExtensionSidebarSelection.setProviderId(CmuxExtensionSidebarSelection.nativeGitWorktreesProviderId)
-            }
+            AppDelegate.shared?.performNewWorktreeAction(
+                tabManager: tabManager,
+                debugSource: "palette.newWorktree"
+            )
         }
         registry.register(commandId: "palette.newBrowserWorkspace") {
             // Let command-palette dismissal complete first so omnibar focus
@@ -10065,7 +10062,6 @@ enum CmuxExtensionSidebarSelection {
     static let selectedExtensionNameDefaultsKey = "cmuxExtensionSidebar.selectedExtensionName"
     static let defaultProviderId = CmuxSidebarProviderDescriptor.defaultWorkspacesID
     static let hostedExtensionsProviderId = "cmux.sidebar.extensions"
-    static let nativeGitWorktreesProviderId = "cmux.sidebar.git-worktrees"
 
     /// Synchronous read of the experimental Extensions flag for the on-demand
     /// AppKit/static paths (the toggle menu, the command-palette builder, the
@@ -10173,7 +10169,7 @@ enum CmuxExtensionSidebarSelection {
     /// independently of the experimental Extensions feature, so they stay in
     /// the switcher menu regardless of the beta flag.
     static var builtInDescriptors: [CmuxSidebarProviderDescriptor] {
-        [.defaultWorkspaces, nativeGitWorktreesDescriptor] + providers.map { $0.descriptor }
+        [.defaultWorkspaces] + providers.map { $0.descriptor }
     }
 
     /// Descriptors offered in the switcher menu and command palette. The hosted
@@ -10193,21 +10189,6 @@ enum CmuxExtensionSidebarSelection {
         builtInDescriptors + [hostedExtensionsDescriptor] + customSidebarDescriptors
     }
 
-    static var nativeGitWorktreesDescriptor: CmuxSidebarProviderDescriptor {
-        CmuxSidebarProviderDescriptor(
-            id: nativeGitWorktreesProviderId,
-            title: CmuxSidebarProviderLocalizedText(
-                key: "gitWorktrees.provider.title",
-                defaultValue: String(localized: "gitWorktrees.provider.title", defaultValue: "Git Worktrees")
-            ),
-            subtitle: CmuxSidebarProviderLocalizedText(
-                key: "gitWorktrees.provider.subtitle",
-                defaultValue: String(localized: "gitWorktrees.provider.subtitle", defaultValue: "Repositories and branches")
-            ),
-            systemImageName: "arrow.triangle.branch",
-            isHostProvided: false
-        )
-    }
 
     static var hostedExtensionsDescriptor: CmuxSidebarProviderDescriptor {
         let selectedName = UserDefaults.standard.string(forKey: selectedExtensionNameDefaultsKey)?.nilIfEmpty
@@ -10248,7 +10229,7 @@ enum CmuxExtensionSidebarSelection {
     /// non-default view.
     static func resolvesToDefaultSidebar(effectiveProviderId id: String) -> Bool {
         if id == defaultProviderId { return true }
-        if id == hostedExtensionsProviderId || id == nativeGitWorktreesProviderId { return false }
+        if id == hostedExtensionsProviderId { return false }
         if id.hasPrefix(customSidebarProviderPrefix) {
             // A custom selection survives only while its backing file exists;
             // otherwise the descriptor lookup falls back to the default sidebar.
@@ -10506,7 +10487,6 @@ struct VerticalTabsSidebar: View, Equatable {
     /// so per-width-tick body evals skip the row-projection prelude. Plain
     /// (non-observed) box: writing it from body cannot re-trigger a render.
     @State private var appKitFrozenTableRowsBox = SidebarAppKitFrozenRowsBox()
-    @StateObject private var gitWorktreeStore = GitWorktreeStore()
     /// Bumped once per interactive-resize end: an apply during the drag
     /// serves frozen rows, so content that changed mid-drag (renames,
     /// notifications) would otherwise stay unrendered until the next
@@ -10658,9 +10638,9 @@ struct VerticalTabsSidebar: View, Equatable {
     /// reference (snapshot-boundary rule). Delegates to a pure predicate so
     /// the logic is unit-testable in isolation from view state.
     private func emptyAreaTopDropIndicatorVisible() -> Bool {
-        let reorderIds = tabManager.sidebarReorderWorkspaceIds(
+        let reorderIds = tabManager.sidebarReorderLeafIds(
             forDraggedWorkspaceId: dragState.draggedTabId,
-            usesTopLevelRows: dragState.dropIndicatorUsesTopLevelRows
+            usesContainerRows: dragState.dropIndicatorUsesTopLevelRows
         )
         return SidebarTabDropIndicatorPredicate().emptyAreaTopVisible(
             draggedTabId: dragState.draggedTabId,
@@ -10678,6 +10658,7 @@ struct VerticalTabsSidebar: View, Equatable {
             targetTabId: nil,
             tabManager: tabManager,
             workspaceGroupIdByWorkspaceId: renderContext.workspaceGroupIdByWorkspaceId,
+            workspaceContainerIdByWorkspaceId: renderContext.workspaceContainerIdByWorkspaceId,
             dragState: dragState,
             selectedTabIds: $selectedTabIds,
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
@@ -10697,14 +10678,20 @@ struct VerticalTabsSidebar: View, Equatable {
         case .raw:
             return tabs.map(\.id)
         case .topLevel:
-            return tabManager.sidebarReorderWorkspaceIds(
+            return tabManager.sidebarReorderLeafIds(
                 forDraggedWorkspaceId: draggedWorkspaceId,
-                usesTopLevelRows: true
+                usesContainerRows: true
             )
         case .group(let groupId):
             guard workspaceGroups.contains(where: { $0.id == groupId }) else { return [] }
             let visibleIds = Set(visibleWorkspaceRowIds)
-            return tabs.filter { $0.groupId == groupId && visibleIds.contains($0.id) }.map(\.id)
+            return tabs.filter {
+                tabManager.workspaceGroup(for: $0.id)?.id == groupId && visibleIds.contains($0.id)
+            }.map(\.id)
+        case .container(let containerId):
+            // Leaves only reorder within their own container; mirror the
+            // coordinator's within-container legal scope.
+            return tabManager.workspaceLeaves(inContainer: containerId).map(\.id)
         }
     }
 
@@ -10776,9 +10763,7 @@ struct VerticalTabsSidebar: View, Equatable {
     struct WorkspaceListRenderContext {
         let environment: SidebarWorkspaceTableEnvironmentSnapshot
         let tabs: [Workspace]
-        /// Stored `tabs.map(\.id)` snapshot so row predicates avoid O(n) work.
         let tabIds: [UUID]
-        /// Drag-scope row ids shared by every visible row for this render pass.
         let sidebarReorderIds: [UUID]
         let workspaceCount: Int
         let canCloseWorkspace: Bool
@@ -10789,12 +10774,15 @@ struct VerticalTabsSidebar: View, Equatable {
         let tabIndexById: [UUID: Int]
         let workspaceById: [UUID: Workspace]
         let workspaceGroupIdByWorkspaceId: [UUID: UUID?]
+        let workspaceContainerIdByWorkspaceId: [UUID: UUID?]
         let selectedContextTargetIds: [UUID]
         let selectedRemoteContextMenuWorkspaceIds: [UUID]
         let allSelectedRemoteContextMenuTargetsConnecting: Bool
         let allSelectedRemoteContextMenuTargetsDisconnected: Bool
         let workspaceGroups: [WorkspaceGroup]
         let workspaceGroupById: [UUID: WorkspaceGroup]
+        let workspaceContainers: [WorkspaceContainer]
+        let workspaceContainerById: [UUID: WorkspaceContainer]
         let memberWorkspaceIdsByGroupId: [UUID: [UUID]]
         let workspaceGroupMenuSnapshot: WorkspaceGroupMenuSnapshot
         let workspaceRenderItems: [SidebarWorkspaceRenderItem]
@@ -10822,7 +10810,10 @@ struct VerticalTabsSidebar: View, Equatable {
             workspacesById: workspaceById,
             liveWorkspaceIds: Set(tabIds)
         )
-        let workspaceGroupIdByWorkspaceId = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0.groupId) })
+        let workspaceGroupIdByWorkspaceId = Dictionary(uniqueKeysWithValues: tabs.map { tab in
+            (tab.id, tabManager.workspaceGroup(for: tab.id)?.id)
+        })
+        let workspaceContainerIdByWorkspaceId = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0.workspaceContainerId) })
         let orderedSelectedTabs = tabs.filter { selectedTabIds.contains($0.id) }
         let selectedContextTargetIds = orderedSelectedTabs.map(\.id)
         let selectedRemoteContextMenuTargets = orderedSelectedTabs.filter {
@@ -10837,15 +10828,22 @@ struct VerticalTabsSidebar: View, Equatable {
             selectedRemoteContextMenuTargets.allSatisfy { $0.remoteConnectionState == .disconnected }
         let workspaceGroups = tabManager.workspaceGroups
         let workspaceGroupById = Dictionary(uniqueKeysWithValues: workspaceGroups.map { ($0.id, $0) })
-        let memberWorkspaceIdsByGroupId = SidebarWorkspaceRenderItem.memberWorkspaceIdsByGroupId(tabs: tabs)
+        let workspaceContainers = tabManager.workspaceContainers
+        let workspaceContainerById = Dictionary(uniqueKeysWithValues: workspaceContainers.map { ($0.id, $0) })
+        let memberWorkspaceIdsByGroupId = Dictionary(grouping: tabs.compactMap { tab -> (UUID, UUID)? in
+            guard let containerId = tab.workspaceContainerId,
+                  let container = workspaceContainerById[containerId] else { return nil }
+            return (container.groupId, tab.id)
+        }, by: { $0.0 }).mapValues { $0.map(\.1) }
         let workspaceGroupMenuSnapshot = WorkspaceGroupMenuSnapshot(
             items: workspaceGroups.map { WorkspaceGroupMenuSnapshot.Item(id: $0.id, name: $0.name) }
         )
         let workspaceRenderItems = SidebarWorkspaceRenderItem.renderItems(
-            tabs: tabs,
-            groupsById: workspaceGroupById
+            groups: workspaceGroups,
+            containers: workspaceContainers,
+            tabs: tabs
         )
-        let visibleWorkspaceRowIds = workspaceRenderItems.map(\.rowWorkspaceId)
+        let visibleWorkspaceRowIds = workspaceRenderItems.compactMap(\.rowWorkspaceId)
         let draggedSidebarTabId = dragState.draggedTabId
         let dropIndicatorScope = dragState.dropIndicatorScope
         let sidebarReorderIds = draggedSidebarTabId.map {
@@ -10884,12 +10882,15 @@ struct VerticalTabsSidebar: View, Equatable {
             tabIndexById: tabIndexById,
             workspaceById: workspaceById,
             workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId,
+            workspaceContainerIdByWorkspaceId: workspaceContainerIdByWorkspaceId,
             selectedContextTargetIds: selectedContextTargetIds,
             selectedRemoteContextMenuWorkspaceIds: selectedRemoteContextMenuWorkspaceIds,
             allSelectedRemoteContextMenuTargetsConnecting: allSelectedRemoteContextMenuTargetsConnecting,
             allSelectedRemoteContextMenuTargetsDisconnected: allSelectedRemoteContextMenuTargetsDisconnected,
             workspaceGroups: workspaceGroups,
             workspaceGroupById: workspaceGroupById,
+            workspaceContainers: workspaceContainers,
+            workspaceContainerById: workspaceContainerById,
             memberWorkspaceIdsByGroupId: memberWorkspaceIdsByGroupId,
             workspaceGroupMenuSnapshot: workspaceGroupMenuSnapshot,
             workspaceRenderItems: workspaceRenderItems,
@@ -11096,132 +11097,7 @@ struct VerticalTabsSidebar: View, Equatable {
     }
 
     private func legacyWorkspaceScrollArea(renderContext: WorkspaceListRenderContext) -> some View {
-        let scrollInsets = SidebarWorkspaceScrollInsets.workspaceList
-        return GeometryReader { viewport in
-            // Keep viewport geometry as a downward-only layout input. Writing
-            // this value into @State from onGeometryChange feeds an
-            // NSHostingView layout pass back into the same LazyVStack graph;
-            // scrolling plus row-height churn can then prevent convergence.
-            let contentMinHeight = SidebarWorkspaceScrollLayout.contentMinHeight(
-                viewportHeight: viewport.size.height,
-                insets: scrollInsets
-            )
-            ScrollViewReader { scrollProxy in
-                ScrollView(.vertical) {
-                    workspaceScrollContent(renderContext: renderContext, minHeight: contentMinHeight)
-                }
-            .coordinateSpace(name: SidebarPointerInteractionMonitor.coordinateSpaceName)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .sidebarPointerEventHost(pointerInteractionMonitor)
-            .background(
-                SidebarScrollViewResolver { scrollView in
-                    configureSidebarScrollView(scrollView)
-                    dragAutoScrollController.attach(scrollView: scrollView)
-                }
-                .frame(width: 0, height: 0)
-            )
-            .safeAreaInset(edge: .top, spacing: 0) {
-                Color.clear.frame(height: scrollInsets.top).allowsHitTesting(false)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                Color.clear.frame(height: scrollInsets.bottom).allowsHitTesting(false)
-            }
-            .mask(
-                SidebarWorkspaceScrollEdgeFadeMask(
-                    topHeight: sidebarTopScrimHeight,
-                    bottomHeight: sidebarBottomScrimHeight
-                )
-            )
-            .overlay(alignment: .top) {
-                // The sidebar top strip remains draggable and handles
-                // double-clicks with the standard titlebar action.
-                WindowDragHandleView()
-                    .frame(height: sidebarTitlebarInteractionHeight)
-                    .background(TitlebarDoubleClickMonitorView())
-            }
-            .overlay(alignment: .topLeading) {
-                minimalModeSidebarTitlebarControlsOverlay()
-            }
-            .overlay(alignment: .top) {
-                workspaceReorderDropOverlay(
-                    renderContext: renderContext,
-                    pointOffset: CGSize(width: 0, height: -scrollInsets.top)
-                )
-                .frame(maxWidth: .infinity)
-                .frame(height: scrollInsets.top)
-            }
-            .background(Color.clear)
-            .modifier(ClearScrollBackground())
-            .onAppear {
-                requestSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
-            }
-            .onChange(of: tabManager.selectedTabId) { _, _ in
-                requestSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
-                // Workspace switches produce no outside click for .transient auto-dismiss; close popovers explicitly.
-                if let dismissed = checklistPopoverWorkspaceId { checklistAddFieldActivationTokens[dismissed] = nil }
-                checklistPopoverWorkspaceId = nil
-            }
-            .onChange(of: renderContext.workspaceIds) { oldWorkspaceIds, newWorkspaceIds in
-                guard shouldRequestSelectedWorkspaceScrollAfterWorkspaceIdsChange(
-                    from: oldWorkspaceIds,
-                    to: newWorkspaceIds
-                ) else {
-                    flushPendingSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
-                    return
-                }
-                requestSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .workspaceOrderDidChange)) { notification in
-                requestSelectedWorkspaceScrollAfterWorkspaceOrderChange(notification)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .workspaceCurrentDirectoryDidChange)) { _ in
-                // Drive a revision counter that the group-header resolver
-                // reads. Forces SwiftUI to re-invoke `cmuxConfigStore.resolveWorkspaceGroupConfig(forCwd:)`
-                // when the anchor's cwd changes while the anchor is not
-                // the selected workspace — otherwise group color/icon/menu
-                // and `+` placement reflect the previous cwd until some
-                // unrelated sidebar event fires.
-                anchorCwdRevision &+= 1
-            }
-            .onReceive(NotificationCenter.default.publisher(for: SidebarMultiSelectionDidHideEvent.notificationName)) { notification in
-                // Group collapse hides some workspaces without changing
-                // focus or wiping the rest of the multi-selection. Strip
-                // only the hidden ids; if focus moved, make sure the new
-                // focused id is still represented.
-                guard let model = notification.object as? SidebarMultiSelectionModel,
-                      model === tabManager.sidebarMultiSelection,
-                      let event = SidebarMultiSelectionDidHideEvent(notification) else { return }
-                var next = selectedTabIds.subtracting(event.hiddenWorkspaceIds)
-                if let movedFocus = event.focusedWorkspaceId {
-                    next.insert(movedFocus)
-                    if let index = tabManager.tabs.firstIndex(where: { $0.id == movedFocus }) {
-                        lastSidebarSelectionIndex = index
-                    }
-                }
-                if next != selectedTabIds {
-                    selectedTabIds = next
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: SidebarMultiSelectionShouldCollapseEvent.notificationName)) { notification in
-                // Keyboard nav (selectNextTab/selectPreviousTab) posts
-                // this so any stale Shift-click range in the sidebar's
-                // SwiftUI selectedTabIds collapses to just the newly-
-                // focused workspace. Without this, batch context-menu /
-                // shortcut actions would still target the stale range.
-                guard let model = notification.object as? SidebarMultiSelectionModel,
-                      model === tabManager.sidebarMultiSelection,
-                      let event = SidebarMultiSelectionShouldCollapseEvent(notification) else { return }
-                let focusedId = event.focusedWorkspaceId
-                let next: Set<UUID> = tabManager.tabs.contains(where: { $0.id == focusedId }) ? [focusedId] : []
-                if selectedTabIds != next {
-                    selectedTabIds = next
-                }
-                if let index = tabManager.tabs.firstIndex(where: { $0.id == focusedId }) {
-                    lastSidebarSelectionIndex = index
-                }
-            }
-        }
-        }
+        appKitWorkspaceScrollArea(renderContext: renderContext)
     }
 
     private func requestSelectedWorkspaceScroll(
@@ -11252,7 +11128,8 @@ struct VerticalTabsSidebar: View, Equatable {
         // the cmux-owned edge in the sidebar layout livelock
         // (https://github.com/manaflow-ai/cmux/issues/2586). No anchor means
         // SwiftUI scrolls the minimum needed to reveal the row.
-        let group = renderContext.workspaceById[selectedWorkspaceId]?.groupId
+        let group = renderContext.workspaceGroupIdByWorkspaceId[selectedWorkspaceId]
+            .flatMap { $0 }
             .flatMap { renderContext.workspaceGroupById[$0] }
         proxy.scrollTo(SidebarSelectedWorkspaceScrollPolicy.scrollTargetWorkspaceId(
             selectedWorkspaceId: selectedWorkspaceId,
@@ -11301,7 +11178,8 @@ struct VerticalTabsSidebar: View, Equatable {
             appKitRowSnapshotCache.prune(keeping: Set(renderContext.workspaceIds))
         }
         let selectedScrollTargetWorkspaceId: UUID? = tabManager.selectedTabId.map { selectedId in
-            let group = renderContext.workspaceById[selectedId]?.groupId
+            let group = renderContext.workspaceGroupIdByWorkspaceId[selectedId]
+                .flatMap { $0 }
                 .flatMap { renderContext.workspaceGroupById[$0] }
             return SidebarSelectedWorkspaceScrollPolicy.scrollTargetWorkspaceId(
                 selectedWorkspaceId: selectedId,
@@ -11415,32 +11293,16 @@ struct VerticalTabsSidebar: View, Equatable {
                 )
             )
         })
-        let groupRowSnapshotsById = Dictionary(uniqueKeysWithValues: renderContext.workspaceGroups.map { group in
-            (
-                group.id,
-                sidebarWorkspaceGroupRowSnapshot(
-                    group: group,
-                    memberWorkspaceIds: renderContext.memberWorkspaceIdsByGroupId[group.id] ?? [],
-                    renderContext: renderContext,
-                    unreadSummariesByWorkspaceId: unreadSummariesByWorkspaceId,
-                    notificationIndex: notificationIndex,
-                    shouldCollectWorkspaceDropTargets: false,
-                    showModifierHoldHints: showModifierHoldHints
-                )
-            )
-        })
         let listSnapshot = SidebarWorkspaceRowsSnapshot(
             workspaceRowsById: workspaceRowInputsById,
-            groupRowsById: groupRowSnapshotsById,
             selectedContextTargetIds: renderContext.selectedContextTargetIds,
-            anchorWorkspaceIds: Set(renderContext.workspaceGroups.map(\.anchorWorkspaceId)),
             workspaceGroupMenuSnapshot: renderContext.workspaceGroupMenuSnapshot,
             canCreateEmptyGroup: tabManager.selectedTab?.isRemoteTmuxMirror != true,
             notificationIndex: notificationIndex
         )
         return renderContext.workspaceRenderItems.compactMap { item -> SidebarWorkspaceTableRowConfiguration? in
             switch item {
-            case .groupHeader(let groupId, _):
+            case .groupHeader(let groupId):
                 guard let group = renderContext.workspaceGroupById[groupId] else { return nil }
                 return sidebarWorkspaceGroupTableConfiguration(
                     group: group,
@@ -11448,15 +11310,44 @@ struct VerticalTabsSidebar: View, Equatable {
                     renderContext: renderContext,
                     showModifierHoldHints: showModifierHoldHints
                 )
+            case .containerHeader(let containerId):
+                guard let container = renderContext.workspaceContainerById[containerId] else { return nil }
+                let leaves = renderContext.tabs.filter { $0.workspaceContainerId == containerId }
+                let model = SidebarContainerHeaderRowModel(
+                    containerId: container.id,
+                    name: container.name,
+                    rootName: container.rootPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? container.name,
+                    isCollapsed: container.isCollapsed,
+                    isActive: leaves.contains { $0.id == tabManager.selectedTabId },
+                    isRootBroken: container.isRootBroken,
+                    isGitCapable: container.supportsManagedWorktrees && !container.isRootBroken,
+                    isPointerHovering: false,
+                    indentation: GlobalFontMagnification.scaledSize(10, percent: renderContext.environment.globalFontMagnificationPercent),
+                    fontScale: renderContext.tabItemSettings.sidebarFontScale,
+                    globalFontMagnificationPercent: renderContext.environment.globalFontMagnificationPercent
+                )
+                let actions = SidebarContainerHeaderRowActions(
+                    onToggleCollapsed: { [weak tabManager, id = container.id] in tabManager?.toggleWorkspaceContainerCollapsed(containerId: id) },
+                    onSelect: { [weak tabManager, id = container.id] in tabManager?.selectWorkspaceContainerHeader(containerId: id) },
+                    onTapPlus: { [weak tabManager, id = container.id] in
+                        guard let tabManager else { return }
+                        _ = AppDelegate.shared?.requestCreateWorktree(containerId: id, tabManager: tabManager, preferredWindow: self.observedWindow)
+                    },
+                    onDelete: { [weak tabManager, id = container.id] in
+                        guard let tabManager else { return }
+                        _ = AppDelegate.shared?.requestDeleteWorkspaceContainer(containerId: id, tabManager: tabManager, preferredWindow: self.observedWindow)
+                    },
+                    onLocateRoot: { [weak tabManager, id = container.id] in
+                        guard let tabManager else { return }
+                        _ = AppDelegate.shared?.requestLocateWorkspaceRoot(containerId: id, tabManager: tabManager, preferredWindow: self.observedWindow)
+                    }
+                )
+                _ = leaves
+                return SidebarWorkspaceTableRowConfiguration(containerHeaderModel: model, actions: actions, environment: renderContext.environment)
             case .workspace(let workspaceId):
                 guard let workspace = renderContext.workspaceById[workspaceId],
                       let input = workspaceRowInputsById[workspaceId] else { return nil }
-                return workspaceTableRowConfiguration(
-                    workspace,
-                    input: input,
-                    listSnapshot: listSnapshot,
-                    renderContext: renderContext
-                )
+                return workspaceTableRowConfiguration(workspace, input: input, listSnapshot: listSnapshot, renderContext: renderContext)
             }
         }
     }
@@ -11476,14 +11367,10 @@ struct VerticalTabsSidebar: View, Equatable {
                 tabManager.closeWorkspaceWithConfirmation(workspace)
             },
             createWorkspaceAtEnd: {
-                if tabManager.selectedTab?.isRemoteTmuxMirror == true {
-                    _ = AppDelegate.shared?.performNewWorkspaceAction(
-                        tabManager: tabManager,
-                        debugSource: "sidebar.emptyArea.remoteTmux"
-                    )
-                } else {
-                    tabManager.addWorkspace(placementOverride: .end)
-                }
+                _ = AppDelegate.shared?.performNewWorkspaceAction(
+                    tabManager: tabManager,
+                    debugSource: "sidebar.emptyArea"
+                )
                 if let selectedId = tabManager.selectedTabId {
                     selectedTabIds = [selectedId]
                     lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == selectedId }
@@ -11612,7 +11499,7 @@ struct VerticalTabsSidebar: View, Equatable {
             isBeingDragged: input.isBeingDragged,
             topDropIndicatorVisible: input.topDropIndicatorVisible,
             bottomDropIndicatorVisible: input.bottomDropIndicatorVisible,
-            isGrouped: input.groupId != nil,
+            isGrouped: input.containerId != nil,
             isFirstRow: input.index == 0,
             shortcutHintText: hintText,
             showsShortcutHints: input.showsModifierShortcutHints,
@@ -11712,7 +11599,7 @@ struct VerticalTabsSidebar: View, Equatable {
         return SidebarWorkspaceTableRowConfiguration(
             workspaceRowModel: model,
             actions: rowActions,
-            groupId: input.groupId,
+            groupId: input.containerId,
             isPinned: input.workspace.isPinned,
             environment: environment
         )
@@ -11743,30 +11630,7 @@ struct VerticalTabsSidebar: View, Equatable {
 
     @ViewBuilder
     private func extensionSidebarScrollAreaContent(renderContext: WorkspaceListRenderContext) -> some View {
-        if effectiveExtensionSidebarProviderId == CmuxExtensionSidebarSelection.nativeGitWorktreesProviderId {
-            GitWorktreeSidebarView(
-                store: gitWorktreeStore,
-                onOpenWorktree: { path, title in
-                    tabManager.addWorkspace(
-                        title: title,
-                        workingDirectory: path,
-                        inheritWorkingDirectory: false,
-                        select: true,
-                        eagerLoadTerminal: false,
-                        autoWelcomeIfNeeded: false
-                    )
-                }
-            )
-            .onAppear {
-                Task {
-                    if let workingDirectory = tabManager.selectedWorkspace?.resolvedWorkingDirectory() {
-                        _ = await gitWorktreeStore.addRepository(path: workingDirectory)
-                    } else {
-                        await gitWorktreeStore.refreshAll()
-                    }
-                }
-            }
-        } else if effectiveExtensionSidebarProviderId == CmuxExtensionSidebarSelection.hostedExtensionsProviderId {
+        if effectiveExtensionSidebarProviderId == CmuxExtensionSidebarSelection.hostedExtensionsProviderId {
             CMUXInstalledExtensionSidebarHostView(
                 snapshotProvider: { cmuxSidebarSnapshotForCurrentTabs() },
                 snapshotUpdateToken: extensionSidebarUpdateToken,
@@ -12943,77 +12807,7 @@ struct VerticalTabsSidebar: View, Equatable {
         renderContext: WorkspaceListRenderContext,
         shouldCollectWorkspaceDropTargets: Bool
     ) -> some View {
-        let signpost = SidebarProfilingSignposts.begin("sidebar-workspace-rows", "renderItems=\(renderContext.workspaceRenderItems.count) collectDropTargets=\(shouldCollectWorkspaceDropTargets)")
-        let renderItems = renderContext.workspaceRenderItems
-        // Reduce live models to cheap immutable values above the LazyVStack.
-        // Shared notification/selection projections are built once here; full
-        // row trees and row-specific closure binding remain lazy.
-        let unreadSummariesByWorkspaceId = sidebarUnread.summaryByWorkspaceId
-        let notificationIndex = SidebarWorkspaceNotificationIndex(
-            notifications: notificationStore.notifications
-        )
-        let workspaceRowInputsById = Dictionary(uniqueKeysWithValues: renderContext.tabs.map { workspace in
-            (
-                workspace.id,
-                workspaceRowInput(
-                    workspace,
-                    renderContext: renderContext,
-                    unreadSummariesByWorkspaceId: unreadSummariesByWorkspaceId
-                )
-            )
-        })
-        let _ = anchorCwdRevision
-        let groupRowSnapshotsById = Dictionary(uniqueKeysWithValues: renderContext.workspaceGroups.map { group in
-            (
-                group.id,
-                sidebarWorkspaceGroupRowSnapshot(
-                    group: group,
-                    memberWorkspaceIds: renderContext.memberWorkspaceIdsByGroupId[group.id] ?? [],
-                    renderContext: renderContext,
-                    unreadSummariesByWorkspaceId: unreadSummariesByWorkspaceId,
-                    notificationIndex: notificationIndex,
-                    shouldCollectWorkspaceDropTargets: shouldCollectWorkspaceDropTargets,
-                    showModifierHoldHints: showModifierHoldHints
-                )
-            )
-        })
-        let listSnapshot = SidebarWorkspaceRowsSnapshot(
-            workspaceRowsById: workspaceRowInputsById,
-            groupRowsById: groupRowSnapshotsById,
-            selectedContextTargetIds: renderContext.selectedContextTargetIds,
-            anchorWorkspaceIds: Set(renderContext.workspaceGroups.map(\.anchorWorkspaceId)),
-            workspaceGroupMenuSnapshot: renderContext.workspaceGroupMenuSnapshot,
-            canCreateEmptyGroup: tabManager.selectedTab?.isRemoteTmuxMirror != true,
-            notificationIndex: notificationIndex
-        )
-        let actionFactory = makeWorkspaceRowActionFactory()
-        let rows = LazyVStack(spacing: tabRowSpacing) {
-            ForEach(renderItems, id: \.id) { item in
-                switch item {
-                case .groupHeader(let groupId, _):
-                    if let snapshot = listSnapshot.groupRowsById[groupId] {
-                        sidebarWorkspaceGroupRow(snapshot: snapshot)
-                    }
-                case .workspace(let workspaceId):
-                    if let input = listSnapshot.workspaceRowsById[workspaceId] {
-                        workspaceRow(
-                            input: input,
-                            listSnapshot: listSnapshot,
-                            actionFactory: actionFactory,
-                            shouldCollectWorkspaceDropTargets: shouldCollectWorkspaceDropTargets
-                        )
-                    }
-                }
-            }
-        }
-        .padding(.vertical, SidebarWorkspaceListMetrics.rowVerticalPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // No whole-content height measurement here: reading the LazyVStack's
-        // total height (GeometryReader, or a custom Layout's sizeThatFits) fed a
-        // non-converging relayout loop (#2586 / #5764 / #5845). Fill is handled
-        // by `.frame(minHeight:)` in workspaceScrollContent.
-        let _ = SidebarProfilingSignposts.end(signpost)
-        rows
+        appKitWorkspaceScrollArea(renderContext: renderContext)
     }
     /// Conditionally installs the row-frame `overlayPreferenceValue` reader (the part
     /// that defeats `LazyVStack` virtualization) only while a drag is collecting drop
@@ -13030,7 +12824,7 @@ struct VerticalTabsSidebar: View, Equatable {
                 .overlayPreferenceValue(SidebarWorkspaceRowFramePreferenceKey.self) { anchors in
                     GeometryReader { proxy in
                         let workspaceGroupsByAnchor = Dictionary(
-                            uniqueKeysWithValues: renderContext.workspaceGroups.map { ($0.anchorWorkspaceId, $0) }
+                            uniqueKeysWithValues: renderContext.workspaceGroups.map { ($0.lastActiveWorkspaceId, $0) }
                         )
                         SidebarWorkspaceDropTargetWriters(
                             bonsplitTargetBridge: bonsplitWorkspaceDropTargetBridge,
@@ -13151,7 +12945,7 @@ struct VerticalTabsSidebar: View, Equatable {
         guard let foreignId = dragState.currentWorkspaceDragId,
               !tabManager.tabs.contains(where: { $0.id == foreignId }),
               let sourceManager = AppDelegate.shared?.tabManagerFor(tabId: foreignId),
-              !sourceManager.workspaceGroups.contains(where: { $0.anchorWorkspaceId == foreignId }) else {
+              !sourceManager.workspaceGroups.contains(where: { $0.lastActiveWorkspaceId == foreignId }) else {
             return false
         }
         dragState.foreignDraggedIsPinned = sourceManager.tabs.first { $0.id == foreignId }?.isPinned ?? false
@@ -13209,14 +13003,24 @@ struct VerticalTabsSidebar: View, Equatable {
                     SidebarWorkspaceReorderWorkspaceSnapshot(
                         id: $0.id,
                         isPinned: $0.isPinned,
-                        groupId: $0.groupId
+                        groupId: $0.workspaceContainerId.flatMap { renderContext.workspaceContainerById[$0]?.groupId }
                     )
                 },
-                groups: renderContext.workspaceGroups.map {
-                    SidebarWorkspaceReorderGroupSnapshot(
-                        id: $0.id,
-                        anchorWorkspaceId: $0.anchorWorkspaceId,
-                        isPinned: $0.isPinned
+                groups: renderContext.workspaceGroups.map { group in
+                    // Structural group focus: the first container's first leaf
+                    // (main leaf of a Git container preferred). Never derived
+                    // from lastActiveWorkspaceId — that is a selection pointer,
+                    // not a structural identity.
+                    let focusLeafId = renderContext.workspaceContainers
+                        .first { $0.groupId == group.id }
+                        .flatMap { container in
+                            tabManager.workspaces.mainLeaf(ofContainer: container.id)?.id
+                                ?? tabManager.workspaceLeaves(inContainer: container.id).first?.id
+                        }
+                    return SidebarWorkspaceReorderGroupSnapshot(
+                        id: group.id,
+                        focusWorkspaceId: focusLeafId,
+                        isPinned: group.isPinned
                     )
                 },
                 targets: targets.map {
@@ -13234,21 +13038,27 @@ struct VerticalTabsSidebar: View, Equatable {
     private func performWorkspaceReorderPlan(_ plan: SidebarWorkspaceReorderDropPlan) -> Bool {
         switch plan.action {
         case .reorder(let targetIndex, let usesTopLevelRows, let explicitGroupId):
+            // The resolver plans in the old group/top-level vocabulary; the
+            // coordinator now reasons about container rows. `usesTopLevelRows`
+            // maps to `usesContainerRows`, and a group-scoped reorder stays a
+            // within-section leaf reorder (explicitContainerId nil — the
+            // coordinator's own clamp keeps the leaf in its section).
             let selectionBeforeReorder = selectedTabIds
-            let anchorWorkspaceIdBeforeReorder = SidebarWorkspaceSelectionSyncPolicy().anchorWorkspaceId(
-                existingAnchorIndex: lastSidebarSelectionIndex,
+            let focusedWorkspaceIdBeforeReorder = SidebarWorkspaceSelectionSyncPolicy().focusWorkspaceId(
+                existingFocusIndex: lastSidebarSelectionIndex,
                 liveWorkspaceIds: tabManager.tabs.map(\.id)
             )
-            let didReorder = tabManager.reorderSidebarWorkspace(
+            let didReorder = tabManager.reorderSidebarRow(
                 tabId: plan.draggedWorkspaceId,
                 toIndex: targetIndex,
                 isDragOperation: true,
-                usesTopLevelRows: usesTopLevelRows,
-                explicitGroupId: explicitGroupId
+                usesContainerRows: usesTopLevelRows,
+                explicitContainerId: nil
             )
+            _ = explicitGroupId
             syncSidebarSelectionAfterWorkspaceReorder(
                 preserving: selectionBeforeReorder,
-                preferredAnchorWorkspaceId: anchorWorkspaceIdBeforeReorder
+                preferredFocusedWorkspaceId: focusedWorkspaceIdBeforeReorder
             )
             return didReorder
         case .crossWindow(insertionIndex: _, proposedInsertionIndex: let proposedInsertionIndex):
@@ -13263,7 +13073,7 @@ struct VerticalTabsSidebar: View, Equatable {
         guard let app = AppDelegate.shared,
               let destinationWindowId = app.windowId(for: tabManager),
               let sourceManager = app.tabManagerFor(tabId: plan.draggedWorkspaceId),
-              !sourceManager.workspaceGroups.contains(where: { $0.anchorWorkspaceId == plan.draggedWorkspaceId }) else {
+              !sourceManager.workspaces.isMainLeaf(plan.draggedWorkspaceId) else {
             return false
         }
 
@@ -13274,8 +13084,12 @@ struct VerticalTabsSidebar: View, Equatable {
         } else {
             candidateIds = [plan.draggedWorkspaceId]
         }
-        let sourceAnchorIds = Set(sourceManager.workspaceGroups.map(\.anchorWorkspaceId))
-        let movingIds = candidateIds.filter { !sourceAnchorIds.contains($0) }
+        let sourceContainerHeaderIds = Set(
+            sourceManager.workspaceContainers.compactMap { container in
+                sourceManager.workspaces.mainLeaf(ofContainer: container.id)?.id
+            }
+        )
+        let movingIds = candidateIds.filter { !sourceContainerHeaderIds.contains($0) }
         guard !movingIds.isEmpty else { return false }
 
         let pinStateById = Dictionary(uniqueKeysWithValues: movingIds.map { id in
@@ -13335,18 +13149,18 @@ struct VerticalTabsSidebar: View, Equatable {
     }
 
     private func crossWindowTopLevelWorkspaceIds() -> [UUID] {
-        tabManager.sidebarReorderWorkspaceIds(
+        tabManager.sidebarReorderLeafIds(
             forDraggedWorkspaceId: nil,
             targetWorkspaceId: nil,
-            usesTopLevelRows: true
+            usesContainerRows: true
         )
     }
 
     private func crossWindowTopLevelPinnedWorkspaceIds() -> Set<UUID> {
-        tabManager.sidebarReorderPinnedWorkspaceIds(
+        tabManager.sidebarReorderPinnedLeafIds(
             forDraggedWorkspaceId: nil,
             targetWorkspaceId: nil,
-            usesTopLevelRows: true
+            usesContainerRows: true
         )
     }
 
@@ -13358,7 +13172,7 @@ struct VerticalTabsSidebar: View, Equatable {
 
     private func syncSidebarSelectionAfterWorkspaceReorder(
         preserving previousSelectionIds: Set<UUID>,
-        preferredAnchorWorkspaceId: UUID?
+        preferredFocusedWorkspaceId: UUID?
     ) {
         let liveWorkspaceIds = tabManager.tabs.map(\.id)
         let nextSelectionIds = SidebarWorkspaceSelectionSyncPolicy().reconciledSelection(
@@ -13367,8 +13181,8 @@ struct VerticalTabsSidebar: View, Equatable {
             fallbackSelectedWorkspaceId: tabManager.selectedTabId
         )
         selectedTabIds = nextSelectionIds
-        lastSidebarSelectionIndex = SidebarWorkspaceSelectionSyncPolicy().anchorIndexAfterWorkspaceReorder(
-            preferredAnchorWorkspaceId: preferredAnchorWorkspaceId,
+        lastSidebarSelectionIndex = SidebarWorkspaceSelectionSyncPolicy().focusIndexAfterWorkspaceReorder(
+            preferredFocusedWorkspaceId: preferredFocusedWorkspaceId,
             selectedWorkspaceIds: nextSelectionIds,
             focusedWorkspaceId: tabManager.selectedTabId,
             liveWorkspaceIds: liveWorkspaceIds
@@ -13414,10 +13228,10 @@ struct VerticalTabsSidebar: View, Equatable {
                 tabManager.workspaceGroups.filter(\.isCollapsed).map(\.id)
             )
             let anchorIdsByGroup = Dictionary(
-                uniqueKeysWithValues: tabManager.workspaceGroups.map { ($0.id, $0.anchorWorkspaceId) }
+                uniqueKeysWithValues: tabManager.workspaceGroups.map { ($0.id, $0.lastActiveWorkspaceId) }
             )
             let rangeIds = tabManager.tabs[lower...upper].compactMap { candidate -> UUID? in
-                if let groupId = candidate.groupId,
+                if let groupId = tabManager.workspaceGroup(for: candidate.id)?.id,
                    collapsedGroupIds.contains(groupId),
                    anchorIdsByGroup[groupId] != candidate.id {
                     return nil
@@ -13582,7 +13396,7 @@ struct VerticalTabsSidebar: View, Equatable {
             : [tab.id]
         let contextMenuPinTarget = WorkspaceActionDispatcher.Target(
             workspaceIds: contextMenuWorkspaceIds,
-            anchorWorkspaceId: tab.id
+            focusWorkspaceId: tab.id
         )
         let contextMenuPinState = WorkspaceActionDispatcher.pinState(
             in: renderContext.pinResolutionContext,
@@ -13653,10 +13467,12 @@ struct VerticalTabsSidebar: View, Equatable {
         }()
         let result = SidebarWorkspaceRowInput(
             workspaceId: tab.id,
-            groupId: tab.groupId,
+            containerId: tab.workspaceContainerId,
+            groupId: tab.workspaceContainerId.flatMap { renderContext.workspaceContainerById[$0]?.groupId },
             index: index,
             workspaceCount: renderContext.workspaceCount,
             workspace: workspaceSnapshot,
+            isWorktreeBindingBroken: workspaceSnapshot.isWorktreeBindingBroken,
             isActive: tabManager.selectedTabId == tab.id,
             isMultiSelected: selectedTabIds.contains(tab.id),
             hasUserCustomTitle: tab.effectiveCustomTitleSource == .user,
@@ -13846,20 +13662,47 @@ struct VerticalTabsSidebar: View, Equatable {
                 _ = AppDelegate.shared?.createEmptyWorkspaceGroup(tabManager: tabManager)
             },
             createGroup: { workspaceIds in
-                guard !workspaceIds.isEmpty else { return }
-                tabManager.createWorkspaceGroup(name: "", childWorkspaceIds: workspaceIds)
+                let containerIds = workspaceIds.reduce(into: [UUID]()) { result, workspaceId in
+                    guard let containerId = tabManager.workspaceContainer(for: workspaceId)?.id,
+                          !result.contains(containerId) else { return }
+                    result.append(containerId)
+                }
+                guard !containerIds.isEmpty,
+                      let groupId = tabManager.createWorkspaceGroup(name: "") else { return }
+                for (index, containerId) in containerIds.enumerated() {
+                    tabManager.moveWorkspaceContainer(containerId: containerId, toGroup: groupId, toIndex: index)
+                }
             },
             addTargetsToGroup: { workspaceIds, groupId in
-                for workspaceId in workspaceIds {
-                    tabManager.addWorkspaceToGroup(
-                        workspaceId: workspaceId,
-                        groupId: groupId
-                    )
+                let containerIds = workspaceIds.reduce(into: [UUID]()) { result, workspaceId in
+                    guard let containerId = tabManager.workspaceContainer(for: workspaceId)?.id,
+                          !result.contains(containerId) else { return }
+                    result.append(containerId)
+                }
+                var targetIndex = tabManager.workspaceContainers.lazy.filter { $0.groupId == groupId }.count
+                for containerId in containerIds {
+                    tabManager.moveWorkspaceContainer(containerId: containerId, toGroup: groupId, toIndex: targetIndex)
+                    targetIndex += 1
                 }
             },
             removeTargetsFromGroup: { workspaceIds in
-                for workspaceId in workspaceIds {
-                    tabManager.removeWorkspaceFromGroup(workspaceId: workspaceId)
+                let containerIds = workspaceIds.reduce(into: [UUID]()) { result, workspaceId in
+                    guard let containerId = tabManager.workspaceContainer(for: workspaceId)?.id,
+                          !result.contains(containerId) else { return }
+                    result.append(containerId)
+                }
+                guard let sourceGroupId = containerIds.first.flatMap({ containerId in
+                    tabManager.workspaceContainers.first { $0.id == containerId }?.groupId
+                }) else { return }
+                let fallbackGroupId = tabManager.workspaceGroups.first { $0.id != sourceGroupId }?.id
+                    ?? tabManager.createWorkspaceGroup(
+                        name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces")
+                    )
+                guard let fallbackGroupId else { return }
+                var targetIndex = tabManager.workspaceContainers.lazy.filter { $0.groupId == fallbackGroupId }.count
+                for containerId in containerIds {
+                    tabManager.moveWorkspaceContainer(containerId: containerId, toGroup: fallbackGroupId, toIndex: targetIndex)
+                    targetIndex += 1
                 }
             },
             reconnectTargets: { workspaceIds in
@@ -16161,6 +16004,7 @@ struct SidebarTabDropDelegate: DropDelegate {
     let targetTabId: UUID?
     let tabManager: TabManager
     let workspaceGroupIdByWorkspaceId: [UUID: UUID?]
+    let workspaceContainerIdByWorkspaceId: [UUID: UUID?]
     let dragState: SidebarDragState
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
@@ -16184,18 +16028,20 @@ struct SidebarTabDropDelegate: DropDelegate {
         !tabManager.tabs.contains { $0.id == draggedTabId }
     }
 
-    /// Whether the foreign dragged workspace is a group *anchor* in its source
-    /// window. A group-header drag carries the anchor id, and moving only the
-    /// anchor across windows would dissolve the group and strand its members,
-    /// so cross-window drops of a group header are disallowed — the group stays
-    /// intact and members can still be dragged out individually. (Migrating a
-    /// whole group across windows is out of scope for this feature.)
-    private func isCrossWindowGroupAnchorDrag(_ draggedTabId: UUID) -> Bool {
+    /// Whether the foreign dragged workspace is a *container header* (the
+    /// structural representative/main leaf of a Git container) in its source
+    /// window. Moving only the header across windows would orphan its container
+    /// and strand its members, so cross-window drops of a container header are
+    /// disallowed — the container stays intact and members can still be dragged
+    /// out individually. Structural identity (main leaf), never a derived
+    /// last-active pointer. (Migrating a whole container across windows is out
+    /// of scope for this feature.)
+    private func isCrossWindowContainerHeaderDrag(_ draggedTabId: UUID) -> Bool {
         guard isCrossWindowDrag(draggedTabId),
               let sourceManager = AppDelegate.shared?.tabManagerFor(tabId: draggedTabId) else {
             return false
         }
-        return sourceManager.workspaceGroups.contains { $0.anchorWorkspaceId == draggedTabId }
+        return sourceManager.workspaces.isMainLeaf(draggedTabId)
     }
 
     /// The destination's top-level sidebar ids (each group is represented by its
@@ -16204,31 +16050,33 @@ struct SidebarTabDropDelegate: DropDelegate {
     /// top-level boundary, so the planner and indicator reason in this space —
     /// not raw `tabs` — to match where the workspace actually lands.
     private func crossWindowTopLevelTabIds() -> [UUID] {
-        tabManager.sidebarReorderWorkspaceIds(
+        tabManager.sidebarReorderLeafIds(
             forDraggedWorkspaceId: nil,
             targetWorkspaceId: nil,
-            usesTopLevelRows: true
+            usesContainerRows: true
         )
     }
 
     private func crossWindowTopLevelPinnedTabIds() -> Set<UUID> {
-        tabManager.sidebarReorderPinnedWorkspaceIds(
+        tabManager.sidebarReorderPinnedLeafIds(
             forDraggedWorkspaceId: nil,
             targetWorkspaceId: nil,
-            usesTopLevelRows: true
+            usesContainerRows: true
         )
     }
 
-    /// Map the hovered destination row to its top-level representative: a group
-    /// member resolves to its group's anchor, since an incoming ungrouped
-    /// workspace lands at the group boundary, never inside the run.
+    /// Map a hovered leaf destination to its container's structural header
+    /// representative (main leaf of a Git container, else first leaf) so the
+    /// top-level drop plan reasons against the container's header row rather
+    /// than an arbitrary member. Never derives identity from a last-active
+    /// pointer.
     private func crossWindowTopLevelTarget() -> UUID? {
-        guard let targetTabId else { return nil }
-        if let groupId = tabManager.tabs.first(where: { $0.id == targetTabId })?.groupId,
-           let anchorId = tabManager.workspaceGroups.first(where: { $0.id == groupId })?.anchorWorkspaceId {
-            return anchorId
+        guard let targetTabId,
+              let tab = tabManager.tabs.first(where: { $0.id == targetTabId }),
+              let containerId = tab.workspaceContainerId else {
+            return targetTabId
         }
-        return targetTabId
+        return containerRepresentativeLeafId(for: containerId) ?? targetTabId
     }
 
     /// Translate a top-level insertion slot into a raw `tabs` index so the
@@ -16249,7 +16097,7 @@ struct SidebarTabDropDelegate: DropDelegate {
         guard dragState.draggedTabId == nil,
               let foreignId = dragState.currentWorkspaceDragId,
               isCrossWindowDrag(foreignId),
-              !isCrossWindowGroupAnchorDrag(foreignId) else { return }
+              !isCrossWindowContainerHeaderDrag(foreignId) else { return }
         // Resolve the foreign workspace's pin state once; it can't change while
         // the drag is in flight, so later hover updates reuse it.
         dragState.foreignDraggedIsPinned = AppDelegate.shared?
@@ -16270,12 +16118,12 @@ struct SidebarTabDropDelegate: DropDelegate {
             return false
         }
         if isCrossWindowDrag(draggedTabId) {
-            // A group header drag carries its anchor id; moving only the anchor
-            // would dissolve the source group, so reject cross-window header
-            // drops (the group stays intact in its window).
-            if isCrossWindowGroupAnchorDrag(draggedTabId) {
+            // A container header drag carries its representative (main) leaf;
+            // moving only it would orphan the source container, so reject
+            // cross-window header drops (the container stays intact).
+            if isCrossWindowContainerHeaderDrag(draggedTabId) {
                 #if DEBUG
-                cmuxDebugLog("sidebar.validateDrop crossWindow=true rejected=groupAnchor")
+                cmuxDebugLog("sidebar.validateDrop crossWindow=true rejected=containerHeader")
                 #endif
                 return false
             }
@@ -16291,15 +16139,15 @@ struct SidebarTabDropDelegate: DropDelegate {
         }
         let targetIsInReorderScope: Bool = {
             guard let targetTabId else { return true }
-            let usesTopLevelRows = tabManager.sidebarReorderUsesTopLevelRows(
+            let usesContainerRows = tabManager.sidebarReorderUsesContainerRows(
                 forDraggedWorkspaceId: draggedTabId,
                 targetWorkspaceId: targetTabId,
-                workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId
+                leafContainerIdByLeafId: workspaceContainerIdByWorkspaceId
             )
-            return tabManager.sidebarReorderWorkspaceIds(
+            return tabManager.sidebarReorderLeafIds(
                 forDraggedWorkspaceId: draggedTabId,
                 targetWorkspaceId: targetTabId,
-                usesTopLevelRows: usesTopLevelRows
+                usesContainerRows: usesContainerRows
             ).contains(targetTabId)
         }()
         #if DEBUG
@@ -16369,33 +16217,33 @@ struct SidebarTabDropDelegate: DropDelegate {
         if isCrossWindowDrag(draggedTabId) {
             return performCrossWindowDrop(draggedTabId: draggedTabId)
         }
-        let defaultUsesTopLevelRows = tabManager.sidebarReorderUsesTopLevelRows(
+        let defaultUsesContainerRows = tabManager.sidebarReorderUsesContainerRows(
             forDraggedWorkspaceId: draggedTabId,
             targetWorkspaceId: targetTabId,
-            workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId
+            leafContainerIdByLeafId: workspaceContainerIdByWorkspaceId
         )
-        let explicitGroupId: UUID? = nil
-        let usesTopLevelRows = usesTopLevelRowsForDrop(
+        let explicitContainerId: UUID? = nil
+        let usesContainerRows = usesContainerRowsForDrop(
             draggedTabId: draggedTabId,
-            explicitGroupId: explicitGroupId,
-            defaultUsesTopLevelRows: defaultUsesTopLevelRows
+            explicitContainerId: explicitContainerId,
+            defaultUsesContainerRows: defaultUsesContainerRows
         )
-        let plannerTargetTabId = plannerTargetTabId(usesTopLevelRows: usesTopLevelRows)
-        let reorderTabIds = tabManager.sidebarReorderWorkspaceIds(
+        let plannerTargetTabId = plannerTargetTabId(usesContainerRows: usesContainerRows)
+        let reorderTabIds = tabManager.sidebarReorderLeafIds(
             forDraggedWorkspaceId: draggedTabId,
             targetWorkspaceId: plannerTargetTabId,
-            usesTopLevelRows: usesTopLevelRows
+            usesContainerRows: usesContainerRows
         )
-        let pinnedTabIds = tabManager.sidebarReorderPinnedWorkspaceIds(
+        let pinnedTabIds = tabManager.sidebarReorderPinnedLeafIds(
             forDraggedWorkspaceId: draggedTabId,
             targetWorkspaceId: plannerTargetTabId,
-            usesTopLevelRows: usesTopLevelRows
+            usesContainerRows: usesContainerRows
         )
         let legalInsertionRange = tabManager.sidebarReorderLegalInsertionRange(
             forDraggedWorkspaceId: draggedTabId,
             targetWorkspaceId: plannerTargetTabId,
-            usesTopLevelRows: usesTopLevelRows,
-            explicitGroupId: explicitGroupId
+            usesContainerRows: usesContainerRows,
+            explicitContainerId: explicitContainerId
         )
         guard let fromIndex = reorderTabIds.firstIndex(of: draggedTabId) else {
 #if DEBUG
@@ -16420,7 +16268,7 @@ struct SidebarTabDropDelegate: DropDelegate {
             return false
         }
 
-        guard fromIndex != targetIndex || explicitGroupId != nil else {
+        guard fromIndex != targetIndex || explicitContainerId != nil else {
 #if DEBUG
             cmuxDebugLog("sidebar.drop.noop from=\(fromIndex) to=\(targetIndex)")
 #endif
@@ -16431,51 +16279,68 @@ struct SidebarTabDropDelegate: DropDelegate {
         cmuxDebugLog("sidebar.drop.commit tab=\(draggedTabId.uuidString.prefix(5)) from=\(fromIndex) to=\(targetIndex)")
 #endif
         let selectionBeforeReorder = selectedTabIds
-        let anchorWorkspaceIdBeforeReorder = SidebarWorkspaceSelectionSyncPolicy().anchorWorkspaceId(
-            existingAnchorIndex: lastSidebarSelectionIndex,
+        let focusedWorkspaceIdBeforeReorder = SidebarWorkspaceSelectionSyncPolicy().focusWorkspaceId(
+            existingFocusIndex: lastSidebarSelectionIndex,
             liveWorkspaceIds: tabManager.tabs.map(\.id)
         )
-        let didReorder = tabManager.reorderSidebarWorkspace(
+        let didReorder = tabManager.reorderSidebarRow(
             tabId: draggedTabId,
             toIndex: targetIndex,
             isDragOperation: true,
-            usesTopLevelRows: usesTopLevelRows,
-            explicitGroupId: explicitGroupId
+            usesContainerRows: usesContainerRows,
+            explicitContainerId: explicitContainerId
         )
         syncSidebarSelection(
             preserving: selectionBeforeReorder,
-            preferredAnchorWorkspaceId: anchorWorkspaceIdBeforeReorder
+            preferredFocusedWorkspaceId: focusedWorkspaceIdBeforeReorder
         )
         return didReorder
     }
 
-    private func usesTopLevelRowsForDrop(
+    private func usesContainerRowsForDrop(
         draggedTabId: UUID?,
-        explicitGroupId: UUID?,
-        defaultUsesTopLevelRows: Bool
+        explicitContainerId: UUID?,
+        defaultUsesContainerRows: Bool
     ) -> Bool {
-        guard explicitGroupId == nil else { return false }
-        guard !defaultUsesTopLevelRows else { return true }
+        guard explicitContainerId == nil else { return false }
+        guard !defaultUsesContainerRows else { return true }
+        // A leaf whose container's representative header is a different leaf is
+        // being promoted out of its container section — plan in container-
+        // header rows so the promotion is explicit and ordered. Resolve the
+        // representative leaf structurally (main leaf for Git containers, the
+        // first available leaf otherwise) rather than reading a derived
+        // last-active pointer.
         guard let draggedTabId,
               tabManager.tabs.contains(where: { $0.id == draggedTabId }),
               let targetTabId,
-              let targetGroupId = workspaceGroupIdByWorkspaceId[targetTabId] ?? nil,
-              let group = tabManager.workspaceGroups.first(where: { $0.id == targetGroupId }),
-              group.anchorWorkspaceId != targetTabId else {
+              let targetContainerId = workspaceContainerIdByWorkspaceId[targetTabId] ?? nil,
+              let representative = containerRepresentativeLeafId(for: targetContainerId),
+              representative != targetTabId else {
             return false
         }
         return true
     }
 
-    private func plannerTargetTabId(usesTopLevelRows: Bool) -> UUID? {
-        guard usesTopLevelRows,
+    private func plannerTargetTabId(usesContainerRows: Bool) -> UUID? {
+        guard usesContainerRows,
               let targetTabId,
-              let targetGroupId = workspaceGroupIdByWorkspaceId[targetTabId] ?? nil,
-              let group = tabManager.workspaceGroups.first(where: { $0.id == targetGroupId }),
-              group.anchorWorkspaceId != targetTabId else {
+              let targetContainerId = workspaceContainerIdByWorkspaceId[targetTabId] ?? nil,
+              let representative = containerRepresentativeLeafId(for: targetContainerId),
+              representative != targetTabId else {
             return targetTabId
         }
-        return group.anchorWorkspaceId
+        return representative
+    }
+
+    /// Structural representative leaf id for a container's header row — the
+    /// main leaf of a Git container, otherwise the container's first leaf.
+    /// Never derives identity from a last-active pointer; used only to pick the
+    /// row a top-level drop plan reasons against.
+    private func containerRepresentativeLeafId(for containerId: UUID) -> UUID? {
+        if let mainLeaf = tabManager.workspaces.mainLeaf(ofContainer: containerId)?.id {
+            return mainLeaf
+        }
+        return tabManager.workspaceLeaves(inContainer: containerId).first?.id
     }
 
     private func plannerPointerY(for info: DropInfo) -> CGFloat? {
@@ -16494,19 +16359,20 @@ struct SidebarTabDropDelegate: DropDelegate {
         guard let app = AppDelegate.shared,
               let destinationWindowId = app.windowId(for: tabManager),
               let sourceManager = app.tabManagerFor(tabId: draggedTabId),
-              // A group header drag carries its anchor; moving only the anchor
-              // would dissolve the group, so cross-window header drops are
-              // disallowed (also gated in validateDrop).
-              !sourceManager.workspaceGroups.contains(where: { $0.anchorWorkspaceId == draggedTabId }) else {
+              // A container header drag carries its representative (main) leaf;
+              // moving only it would orphan the source container, so cross-
+              // window header drops are disallowed (also gated in validateDrop).
+              !sourceManager.workspaces.isMainLeaf(draggedTabId) else {
 #if DEBUG
-            cmuxDebugLog("sidebar.drop.crossWindow.abort reason=unresolvedRouteOrGroupAnchor tab=\(draggedTabId.uuidString.prefix(5))")
+            cmuxDebugLog("sidebar.drop.crossWindow.abort reason=unresolvedRouteOrContainerHeader tab=\(draggedTabId.uuidString.prefix(5))")
 #endif
             return false
         }
 
         // Move the source window's whole multi-selection when the dragged
-        // workspace is part of it; otherwise just the dragged workspace. Group
-        // anchors in the selection are excluded for the same reason as above.
+        // workspace is part of it; otherwise just the dragged workspace.
+        // Container headers (main leaves) in the selection are excluded: moving
+        // one alone would orphan its container.
         let sourceSelection = sourceManager.sidebarSelectedWorkspaceIds
         let candidateIds: [UUID]
         if sourceSelection.contains(draggedTabId), sourceSelection.count > 1 {
@@ -16514,8 +16380,12 @@ struct SidebarTabDropDelegate: DropDelegate {
         } else {
             candidateIds = [draggedTabId]
         }
-        let sourceAnchorIds = Set(sourceManager.workspaceGroups.map(\.anchorWorkspaceId))
-        let movingIds = candidateIds.filter { !sourceAnchorIds.contains($0) }
+        let sourceContainerHeaderIds = Set(
+            sourceManager.workspaceContainers.compactMap { container in
+                sourceManager.workspaces.mainLeaf(ofContainer: container.id)?.id
+            }
+        )
+        let movingIds = candidateIds.filter { !sourceContainerHeaderIds.contains($0) }
         guard !movingIds.isEmpty else { return false }
 
 #if DEBUG
@@ -16587,33 +16457,33 @@ struct SidebarTabDropDelegate: DropDelegate {
             updateCrossWindowDropIndicator(pointerY: pointerY)
             return
         }
-        let defaultUsesTopLevelRows = tabManager.sidebarReorderUsesTopLevelRows(
+        let defaultUsesContainerRows = tabManager.sidebarReorderUsesContainerRows(
             forDraggedWorkspaceId: dragState.draggedTabId,
             targetWorkspaceId: targetTabId,
-            workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId
+            leafContainerIdByLeafId: workspaceContainerIdByWorkspaceId
         )
-        let explicitGroupId: UUID? = nil
-        let usesTopLevelRows = usesTopLevelRowsForDrop(
+        let explicitContainerId: UUID? = nil
+        let usesContainerRows = usesContainerRowsForDrop(
             draggedTabId: dragState.draggedTabId,
-            explicitGroupId: explicitGroupId,
-            defaultUsesTopLevelRows: defaultUsesTopLevelRows
+            explicitContainerId: explicitContainerId,
+            defaultUsesContainerRows: defaultUsesContainerRows
         )
-        let plannerTargetTabId = plannerTargetTabId(usesTopLevelRows: usesTopLevelRows)
-        let tabIds = tabManager.sidebarReorderWorkspaceIds(
+        let plannerTargetTabId = plannerTargetTabId(usesContainerRows: usesContainerRows)
+        let tabIds = tabManager.sidebarReorderLeafIds(
             forDraggedWorkspaceId: dragState.draggedTabId,
             targetWorkspaceId: plannerTargetTabId,
-            usesTopLevelRows: usesTopLevelRows
+            usesContainerRows: usesContainerRows
         )
-        let pinnedTabIds = tabManager.sidebarReorderPinnedWorkspaceIds(
+        let pinnedTabIds = tabManager.sidebarReorderPinnedLeafIds(
             forDraggedWorkspaceId: dragState.draggedTabId,
             targetWorkspaceId: plannerTargetTabId,
-            usesTopLevelRows: usesTopLevelRows
+            usesContainerRows: usesContainerRows
         )
         let legalInsertionRange = tabManager.sidebarReorderLegalInsertionRange(
             forDraggedWorkspaceId: dragState.draggedTabId,
             targetWorkspaceId: plannerTargetTabId,
-            usesTopLevelRows: usesTopLevelRows,
-            explicitGroupId: explicitGroupId
+            usesContainerRows: usesContainerRows,
+            explicitContainerId: explicitContainerId
         )
         let plannedIndicator = SidebarDropPlanner().indicator(
             draggedTabId: dragState.draggedTabId,
@@ -16625,12 +16495,12 @@ struct SidebarTabDropDelegate: DropDelegate {
             targetHeight: targetRowHeight
         )
         let nextIndicator = plannedIndicator
-        let nextUsesTopLevelRows = nextIndicator != nil && usesTopLevelRows
+        let nextUsesTopLevelRows = nextIndicator != nil && usesContainerRows
         guard dragState.dropIndicator != nextIndicator ||
                 dragState.dropIndicatorUsesTopLevelRows != nextUsesTopLevelRows else {
             return
         }
-        dragState.setDropIndicator(nextIndicator, usesTopLevelRows: usesTopLevelRows)
+        dragState.setDropIndicator(nextIndicator, usesTopLevelRows: usesContainerRows)
     }
 
     /// Drop indicator for a foreign workspace hovering this window. The dragged
@@ -16670,7 +16540,7 @@ struct SidebarTabDropDelegate: DropDelegate {
 
     private func syncSidebarSelection(
         preserving previousSelectionIds: Set<UUID>,
-        preferredAnchorWorkspaceId: UUID?
+        preferredFocusedWorkspaceId: UUID?
     ) {
         let liveWorkspaceIds = tabManager.tabs.map(\.id)
         let nextSelectionIds = SidebarWorkspaceSelectionSyncPolicy().reconciledSelection(
@@ -16679,8 +16549,8 @@ struct SidebarTabDropDelegate: DropDelegate {
             fallbackSelectedWorkspaceId: tabManager.selectedTabId
         )
         selectedTabIds = nextSelectionIds
-        lastSidebarSelectionIndex = SidebarWorkspaceSelectionSyncPolicy().anchorIndexAfterWorkspaceReorder(
-            preferredAnchorWorkspaceId: preferredAnchorWorkspaceId,
+        lastSidebarSelectionIndex = SidebarWorkspaceSelectionSyncPolicy().focusIndexAfterWorkspaceReorder(
+            preferredFocusedWorkspaceId: preferredFocusedWorkspaceId,
             selectedWorkspaceIds: nextSelectionIds,
             focusedWorkspaceId: tabManager.selectedTabId,
             liveWorkspaceIds: liveWorkspaceIds

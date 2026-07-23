@@ -380,13 +380,16 @@ final class SidebarWorkspaceRowTableCellView: NSTableCellView {
             }
         }
 
+        let brokenWorktreeSubtitle: String? = snapshot.isWorktreeBindingBroken
+            ? String(localized: "workspaceLeaf.brokenWorktree", defaultValue: "Broken Worktree")
+            : nil
         let conversationSubtitle: String? = {
             guard !settings.hidesAllDetails, settings.iMessageModeEnabled else { return nil }
             let trimmed = snapshot.latestConversationMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
             return (trimmed?.isEmpty == false) ? trimmed : nil
         }()
-        let effectiveSubtitle = model.latestNotificationText ?? conversationSubtitle
         let subtitleLineLimit = model.latestNotificationText == nil ? 2 : settings.notificationMessageLineLimit
+        let effectiveSubtitle = brokenWorktreeSubtitle ?? model.latestNotificationText ?? conversationSubtitle
         subtitleView.isHidden = effectiveSubtitle == nil
         if let effectiveSubtitle {
             subtitleView.maximumNumberOfLines = subtitleLineLimit

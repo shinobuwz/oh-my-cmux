@@ -64,8 +64,8 @@ extension ControlCommandCoordinator {
             "name": .string(group.name),
             "is_collapsed": .bool(group.isCollapsed),
             "is_pinned": .bool(group.isPinned),
-            "anchor_workspace_id": .string(group.anchorWorkspaceID.uuidString),
-            "anchor_workspace_ref": ref(.workspace, group.anchorWorkspaceID),
+            "last_active_workspace_id": orNull(group.lastActiveWorkspaceID?.uuidString),
+            "last_active_workspace_ref": group.lastActiveWorkspaceID.map { ref(.workspace, $0) } ?? .null,
             "custom_color": orNull(group.customColor),
             "icon_symbol": orNull(group.iconSymbol),
             "member_workspace_ids": .array(group.memberWorkspaceIDs.map { .string($0.uuidString) }),
@@ -420,7 +420,8 @@ extension ControlCommandCoordinator {
             allChildrenAreAnchors: "",
             workspaceIsOtherGroupAnchor: "",
             invalidReferenceWorkspace: "",
-            closeWorkspacesMustBeBoolean: ""
+            closeWorkspacesMustBeBoolean: "",
+            nonEmptyGroupCannotBeDeleted: ""
         )
     }
 

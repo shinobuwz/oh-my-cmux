@@ -726,6 +726,13 @@ struct cmuxApp: App {
                     }
                 }
 
+                splitCommandButton(title: String(localized: "menu.file.newWorktree", defaultValue: "New Worktree…"), shortcut: menuShortcut(for: .newWorktree)) {
+                    AppDelegate.shared?.performNewWorktreeAction(
+                        tabManager: activeTabManager,
+                        debugSource: "menu.newWorktree"
+                    )
+                }
+
                 splitCommandButton(title: String(localized: "menu.file.newBrowserWorkspace", defaultValue: "New Browser Workspace"), shortcut: menuShortcut(for: .newBrowserWorkspace)) {
                     if let appDelegate = AppDelegate.shared {
                         appDelegate.performNewBrowserWorkspaceAction(

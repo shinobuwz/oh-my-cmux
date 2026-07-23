@@ -146,9 +146,13 @@ extension SessionPersistencePolicy {
             original: window.tabManager.selectedWorkspaceIndex,
             keptOriginalIndices: keptOriginalIndices
         )
+        tabManager.workspaceContainers = pruningWorkspaceContainers(
+            window.tabManager.workspaceContainers,
+            keptWorkspaces: keptWorkspaces
+        )
         tabManager.workspaceGroups = pruningWorkspaceGroups(
             window.tabManager.workspaceGroups,
-            originalWorkspaces: originalWorkspaces,
+            containers: tabManager.workspaceContainers,
             keptWorkspaces: keptWorkspaces
         )
         prunedWindow.tabManager = tabManager
@@ -264,34 +268,44 @@ extension SessionPersistencePolicy {
         return keptOriginalIndices.lastIndex(where: { $0 < original }) ?? 0
     }
 
-    private static func pruningWorkspaceGroups(
-        _ groups: [SessionWorkspaceGroupSnapshot]?,
-        originalWorkspaces: [SessionWorkspaceSnapshot],
+    private static func pruningWorkspaceContainers(
+        _ containers: [SessionWorkspaceContainerSnapshot]?,
         keptWorkspaces: [SessionWorkspaceSnapshot]
-    ) -> [SessionWorkspaceGroupSnapshot]? {
-        guard let groups else { return nil }
-        let originalMembersByGroupId = Dictionary(grouping: originalWorkspaces, by: \.groupId)
-        let keptMembersByGroupId = Dictionary(grouping: keptWorkspaces, by: \.groupId)
-        let occupiedGroupIds = Set(keptMembersByGroupId.keys.compactMap { $0 })
-        let pruned = groups.compactMap { group -> SessionWorkspaceGroupSnapshot? in
-            guard occupiedGroupIds.contains(group.id) else { return nil }
-            let groupId = Optional(group.id)
-            let originalMembers = originalMembersByGroupId[groupId] ?? []
-            let keptMembers = keptMembersByGroupId[groupId] ?? []
-            guard !keptMembers.isEmpty else { return nil }
-
-            var copy = group
-            let originalAnchorWorkspaceId = group.anchorWorkspaceId ?? group.anchorMemberIndex.flatMap { index in
-                originalMembers.indices.contains(index) ? originalMembers[index].workspaceId : nil
+    ) -> [SessionWorkspaceContainerSnapshot]? {
+        guard let containers else { return nil }
+        let membersByContainerId = Dictionary(grouping: keptWorkspaces, by: \.groupId)
+        let pruned = containers.compactMap { container -> SessionWorkspaceContainerSnapshot? in
+            let members = membersByContainerId[Optional(container.id)] ?? []
+            guard !members.isEmpty else { return nil }
+            var copy = container
+            if copy.lastActiveWorkspaceId.flatMap({ activeId in
+                members.contains { $0.workspaceId == activeId } ? activeId : nil
+            }) == nil {
+                copy.lastActiveWorkspaceId = members.first?.workspaceId
             }
-            let newAnchorIndex = originalAnchorWorkspaceId.flatMap { anchorId in
-                keptMembers.firstIndex { $0.workspaceId == anchorId }
-            } ?? 0
-            copy.anchorMemberIndex = newAnchorIndex
-            copy.anchorWorkspaceId = keptMembers[newAnchorIndex].workspaceId
             return copy
         }
         return pruned.isEmpty ? nil : pruned
+    }
+
+    private static func pruningWorkspaceGroups(
+        _ groups: [SessionWorkspaceGroupSnapshot]?,
+        containers: [SessionWorkspaceContainerSnapshot]?,
+        keptWorkspaces: [SessionWorkspaceSnapshot]
+    ) -> [SessionWorkspaceGroupSnapshot]? {
+        guard let groups else { return nil }
+        let containersByGroupId = Dictionary(grouping: containers ?? [], by: \.groupId)
+        let membersByContainerId = Dictionary(grouping: keptWorkspaces, by: \.groupId)
+        return groups.map { group in
+            var copy = group
+            let memberWorkspaceIds = (containersByGroupId[group.id] ?? []).flatMap { container in
+                (membersByContainerId[Optional(container.id)] ?? []).compactMap(\.workspaceId)
+            }
+            if copy.lastActiveWorkspaceId.map(memberWorkspaceIds.contains) != true {
+                copy.lastActiveWorkspaceId = memberWorkspaceIds.first
+            }
+            return copy
+        }
     }
 
     private static func isCmuxCrashStoragePath(

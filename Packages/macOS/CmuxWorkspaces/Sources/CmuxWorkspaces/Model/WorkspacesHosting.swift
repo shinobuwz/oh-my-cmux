@@ -28,6 +28,8 @@ public protocol WorkspacesHosting<Tab>: AnyObject {
     /// The `workspaceGroups` array is about to change (legacy `@Published
     /// workspaceGroups` willSet).
     func workspaceGroupsWillChange(to newValue: [WorkspaceGroup])
+    /// The `workspaceContainers` array is about to change.
+    func workspaceContainersWillChange(to newValue: [WorkspaceContainer])
     /// The selected workspace id is about to change (legacy `@Published
     /// selectedTabId` willSet; the host's DEBUG switch tracing lives here).
     func selectedWorkspaceIdWillChange(to newValue: UUID?)

@@ -92,7 +92,11 @@ extension TerminalController {
             // a single entry), not a sidebar render, so it omits group sections to
             // keep the response minimal. The phone always lists the full window.
             if requestedWorkspaceID == nil, requestedTerminalID == nil {
-                groups = mobileWorkspaceGroupPayloads(tabManager.workspaceGroups, tabs: tabManager.tabs)
+                groups = mobileWorkspaceGroupPayloads(
+                    tabManager.workspaceGroups,
+                    containers: tabManager.workspaceContainers,
+                    tabs: tabManager.tabs
+                )
             }
             let visibleWorkspaces = requestedWorkspaceID.map { workspaceID in
                 tabManager.tabs.filter { $0.id == workspaceID }
@@ -144,6 +148,7 @@ extension TerminalController {
                 aggregatedGroups.append(
                     contentsOf: mobileWorkspaceGroupPayloads(
                         windowTabManager.workspaceGroups,
+                        containers: windowTabManager.workspaceContainers,
                         tabs: windowTabManager.tabs
                     )
                 )
@@ -212,6 +217,10 @@ extension TerminalController {
         let store = notificationStore ?? AppDelegate.shared?.notificationStore
         let latestNotification = store?.latestNotification(forTabId: workspace.id)
         let preview = Self.mobileWorkspacePreview(latestNotification: latestNotification)
+        let groupID = workspace.workspaceContainerId.flatMap { containerID in
+            AppDelegate.shared?.tabManagerFor(tabId: workspace.id)?
+                .workspaceContainers.first(where: { $0.id == containerID })?.groupId
+        }
         return [
             "id": workspace.id.uuidString,
             "window_id": v2OrNull(windowID?.uuidString),
@@ -221,7 +230,7 @@ extension TerminalController {
             "is_pinned": workspace.isPinned,
             // Group membership so the phone can fold contiguous same-group
             // workspaces under their group header. nil for ungrouped workspaces.
-            "group_id": v2OrNull(workspace.groupId?.uuidString),
+            "group_id": v2OrNull(groupID?.uuidString),
             // iMessage-style last-activity preview: a one-line, plain-text summary
             // of the most recent notification (agent/terminal activity), with its
             // timestamp, so the phone can show a preview + relative time per row.
@@ -394,12 +403,18 @@ extension TerminalController {
     /// are taken in `tabs` spatial order so the phone's grouping matches the Mac.
     /// Membership is resolved with a single pass over `tabs` (not a scan per
     /// group), keeping this synchronous RPC path linear on large workspace sets.
-    func mobileWorkspaceGroupPayloads(_ groups: [WorkspaceGroup], tabs: [Workspace]) -> [[String: Any]] {
+    func mobileWorkspaceGroupPayloads(
+        _ groups: [WorkspaceGroup],
+        containers: [WorkspaceContainer],
+        tabs: [Workspace]
+    ) -> [[String: Any]] {
         guard !groups.isEmpty else { return [] }
+        let groupIDByContainerID = Dictionary(uniqueKeysWithValues: containers.map { ($0.id, $0.groupId) })
         var memberIDsByGroup: [UUID: [String]] = [:]
         for workspace in tabs {
-            guard let groupId = workspace.groupId else { continue }
-            memberIDsByGroup[groupId, default: []].append(workspace.id.uuidString)
+            guard let containerID = workspace.workspaceContainerId,
+                  let groupID = groupIDByContainerID[containerID] else { continue }
+            memberIDsByGroup[groupID, default: []].append(workspace.id.uuidString)
         }
         return groups.map { group in
             [
@@ -407,7 +422,7 @@ extension TerminalController {
                 "name": group.name,
                 "is_collapsed": group.isCollapsed,
                 "is_pinned": group.isPinned,
-                "anchor_workspace_id": group.anchorWorkspaceId.uuidString,
+                "anchor_workspace_id": group.lastActiveWorkspaceId?.uuidString ?? "",
                 "member_workspace_ids": memberIDsByGroup[group.id] ?? []
             ]
         }

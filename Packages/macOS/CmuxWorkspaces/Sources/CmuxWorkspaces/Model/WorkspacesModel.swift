@@ -1,16 +1,12 @@
 public import Foundation
 public import Observation
 
-/// The per-window workspace-list sub-model: owns the window's workspace
-/// ("tab") order, the sidebar group sections, and the selected-workspace id —
-/// the stored state the legacy `TabManager` god object kept in its
-/// `@Published tabs` / `workspaceGroups` / `selectedTabId` properties.
+/// The per-window workspace hierarchy model.
 ///
-/// The window's `TabManager` composition root owns one instance, forwards
-/// its legacy accessors here, and implements `WorkspacesHosting` to receive
-/// the property-observer hooks the legacy `@Published` observers provided
-/// (objectWillChange/bridge re-emission, DEBUG switch tracing, and the
-/// selection side-effect chain).
+/// Group, container, and workspace arrays define the canonical order at each
+/// sidebar level. Existing workspace objects remain the selected terminal hosts.
+/// The owning `TabManager` composition root forwards legacy accessors and
+/// receives synchronous mutation hooks through ``WorkspacesHosting``.
 @MainActor
 @Observable
 public final class WorkspacesModel<Tab: WorkspaceTabRepresenting> {
@@ -19,22 +15,15 @@ public final class WorkspacesModel<Tab: WorkspaceTabRepresenting> {
         willSet { host?.workspaceTabsWillChange(to: newValue) }
     }
 
-    /// Named groupings of workspaces shown as collapsible sections in the
-    /// sidebar. Group order in this array defines section order. Each member
-    /// workspace stores its `groupId` on the workspace itself.
+    /// Independent top-level groups in sidebar order.
     public var workspaceGroups: [WorkspaceGroup] = [] {
-        willSet {
-            groupNamesByAnchorWorkspaceId = Dictionary(
-                newValue.map { ($0.anchorWorkspaceId, $0.name) },
-                uniquingKeysWith: { first, _ in first }
-            )
-            host?.workspaceGroupsWillChange(to: newValue)
-        }
+        willSet { host?.workspaceGroupsWillChange(to: newValue) }
     }
 
-    /// O(1) display-title lookup for group anchors in title-churn observers.
-    @ObservationIgnored
-    public private(set) var groupNamesByAnchorWorkspaceId: [UUID: String] = [:]
+    /// Second-level root containers in sidebar order.
+    public var workspaceContainers: [WorkspaceContainer] = [] {
+        willSet { host?.workspaceContainersWillChange(to: newValue) }
+    }
 
     /// The selected workspace's id, if any.
     public var selectedTabId: UUID? {

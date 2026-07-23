@@ -65,20 +65,22 @@ final class SidebarWorkspaceTableDropTargetGeometryGate {
         let lower = max(0, visibleRange.location)
         let upper = min(rows.count, visibleRange.location + visibleRange.length)
         let visibleIndexes = lower..<upper
-        container.reorderDropView.targets = visibleIndexes.map { row in
+        container.reorderDropView.targets = visibleIndexes.compactMap { row in
             let configuration = rows[row]
+            guard let workspaceId = configuration.workspaceId else { return nil }
             return SidebarWorkspaceReorderDropOverlay.Target(
-                workspaceId: configuration.workspaceId,
+                workspaceId: workspaceId,
                 groupId: configuration.groupId,
                 isGroupHeader: configuration.isGroupHeader,
                 frame: table.convert(table.rect(ofRow: row), to: container.reorderDropView)
             )
         }
         container.reorderDropView.targetsDidUpdate()
-        bonsplitTargetBridge.updateTargets(visibleIndexes.map { row in
+        bonsplitTargetBridge.updateTargets(visibleIndexes.compactMap { row in
             let configuration = rows[row]
+            guard let workspaceId = configuration.workspaceId else { return nil }
             return SidebarDropPlanner.WorkspaceDropTarget(
-                workspaceId: configuration.workspaceId,
+                workspaceId: workspaceId,
                 isPinned: configuration.isPinned,
                 frame: table.convert(table.rect(ofRow: row), to: container.bonsplitDropView)
             )

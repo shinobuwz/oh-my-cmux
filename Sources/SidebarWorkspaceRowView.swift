@@ -22,7 +22,7 @@ struct SidebarWorkspaceRowView: View {
             )
             .padding(
                 .leading,
-                snapshot.groupId != nil ? SidebarWorkspaceGroupingMetrics.memberIndent : 0
+                snapshot.containerId != nil ? SidebarWorkspaceGroupingMetrics.memberIndent : 0
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())

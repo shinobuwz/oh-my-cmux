@@ -119,7 +119,9 @@ final class SidebarWorkspaceTableRowHeightCache {
         for index in indexes {
             guard rows.indices.contains(index) else { continue }
             let row = rows[index]
-            guard row.appKitGroupHeaderModel != nil || row.appKitWorkspaceRowModel != nil else { continue }
+            guard row.appKitGroupHeaderModel != nil
+                || row.appKitContainerHeaderModel != nil
+                || row.appKitWorkspaceRowModel != nil else { continue }
             let previous = entries[row.id]
             if let previous, previous.matches(row: row, columnWidth: columnWidth) { continue }
             let measuredHeight = Self.normalizedHeight(measureHostedRow(row: row, columnWidth: columnWidth))
@@ -162,6 +164,9 @@ final class SidebarWorkspaceTableRowHeightCache {
         // hosted SwiftUI measurement path for them.
         if let headerModel = row.appKitGroupHeaderModel {
             return SidebarGroupHeaderTableCellView.preferredHeight(model: headerModel)
+        }
+        if let containerModel = row.appKitContainerHeaderModel {
+            return SidebarContainerHeaderTableCellView.preferredHeight(model: containerModel)
         }
         if let rowModel = row.appKitWorkspaceRowModel,
            let actions = row.appKitWorkspaceRowActions {

@@ -161,6 +161,7 @@ extension TerminalSurface {
             let ghosttyCLIPath = cliBinURL.appendingPathComponent("ghostty").path
             if FileManager.default.isExecutableFile(atPath: ghosttyCLIPath) {
                 setManagedEnvironmentValue("GHOSTTY_BIN", ghosttyCLIPath)
+                setManagedEnvironmentValue("GHOSTTY_BIN_DIR", cliBinPath)
             }
             let currentPath = env["PATH"]
                 ?? getenv("PATH").map { String(cString: $0) }

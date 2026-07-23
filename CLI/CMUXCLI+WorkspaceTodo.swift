@@ -295,6 +295,8 @@ extension CMUXCLI {
     Subcommands:
       list                    List workspaces in a window
       create [flags]          Create a workspace (same flags as new-workspace)
+      new-worktree <branch> [flags]
+                              Create a managed Git worktree in the selected workspace
       env [workspace] [--mask]
                               Print a workspace's configured environment
                               variables (--mask redacts the values)
@@ -315,6 +317,7 @@ extension CMUXCLI {
     Examples:
       cmux workspace list --json
       cmux workspace create --name Build --cwd ~/projects/myapp
+      cmux workspace new-worktree feature/sidebar --focus true
       cmux workspace env workspace:3 --mask
       cmux workspace close workspace:3
       cmux workspace reconnect

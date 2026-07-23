@@ -30,6 +30,29 @@ enum WorkspaceOrderChangeNotificationKey {
     static let movedWorkspaceIds = "movedWorkspaceIds"
 }
 
+enum WorkspaceRootRegistrationOutcome: Equatable {
+    case created(containerId: UUID, selectedWorkspaceId: UUID)
+    case existing(containerId: UUID, workspaceId: UUID)
+}
+
+enum WorkspaceRootRegistrationError: Error, Equatable {
+    case missingGroup
+    case invalidDirectory(String)
+    case bareRepository(String)
+    case creationFailed
+}
+
+enum ManagedWorktreeMutationError: Error, Equatable {
+    case missingContainer
+    case notGitContainer
+    case unbornRepository
+    case mainWorktree
+    case unmanagedWorktree
+    case missingManagedBranch
+    case crossWindowReference(windowId: UUID)
+    case git(CmuxGit.GitWorktreeError)
+}
+
 #if DEBUG
 // Sample the actual IOSurface-backed terminal layer at vsync cadence so UI tests can reliably
 // catch a single compositor-frame blank flash and any transient compositor scaling (stretched text).
@@ -199,12 +222,15 @@ class TabManager: ObservableObject {
         get { workspaces.tabs }
         set { workspaces.tabs = newValue }
     }
-    /// Named groupings of workspaces shown as collapsible sections in the sidebar.
-    /// Group order in this array defines section order in the sidebar.
-    /// Each member workspace stores its `groupId` on the `Workspace` model.
+    /// Independent top-level sidebar groups in display order.
     var workspaceGroups: [WorkspaceGroup] {
         get { workspaces.workspaceGroups }
         set { workspaces.workspaceGroups = newValue }
+    }
+    /// Second-level workspace root containers in display order.
+    var workspaceContainers: [WorkspaceContainer] {
+        get { workspaces.workspaceContainers }
+        set { workspaces.workspaceContainers = newValue }
     }
 
     /// Legacy Combine bridge for the remaining `tabManager.$tabs`
@@ -223,6 +249,8 @@ class TabManager: ObservableObject {
     /// on subscribe — the `Published.Publisher` semantics those call sites
     /// were written against.
     let workspaceGroupsPublisher = CurrentValueSubject<[WorkspaceGroup], Never>([])
+    /// Legacy Combine bridge for workspace-container observers.
+    let workspaceContainersPublisher = CurrentValueSubject<[WorkspaceContainer], Never>([])
     /// Set by `restoreSessionSnapshot` to suppress side-effects (like auto-
     /// expanding a group on focus) that would mutate restored state mid-restore.
     private var isRestoringSessionSnapshot: Bool = false
@@ -253,6 +281,11 @@ class TabManager: ObservableObject {
     func workspaceGroupsWillChange(to newValue: [WorkspaceGroup]) {
         objectWillChange.send()
         workspaceGroupsPublisher.send(newValue)
+    }
+
+    func workspaceContainersWillChange(to newValue: [WorkspaceContainer]) {
+        objectWillChange.send()
+        workspaceContainersPublisher.send(newValue)
     }
 
     /// Legacy `@Published selectedTabId` willSet; `selectedTabId` still
@@ -292,7 +325,7 @@ class TabManager: ObservableObject {
     func selectedWorkspaceIdDidChange(from oldValue: UUID?) {
             guard selectedTabId != oldValue else { return }
             if !isRestoringSessionSnapshot {
-                workspaces.expandWorkspaceGroupForSelectionIfNeeded()
+                workspaces.recordSelection(ofLeaf: selectedTabId)
             }
             sentryBreadcrumb("workspace.switch", data: [
                 "tabCount": tabs.count
@@ -415,6 +448,8 @@ class TabManager: ObservableObject {
     // (CmuxWorkspaces); creation/teardown/selection invert through
     // WorkspaceGroupHosting.
     let workspaceGrouping: WorkspaceGroupCoordinator<Workspace>
+    /// Second-level root-container lifecycle over the shared workspace model.
+    let workspaceContainerCoordinator: WorkspaceContainerCoordinator<Workspace>
     private var shouldRecordFocusHistory: Bool {
         focusHistoryNavigation.shouldRecordFocusHistory
     }
@@ -459,6 +494,7 @@ class TabManager: ObservableObject {
     let sidebarGitMetadataService: any SidebarGitMetadataServing
     let pullRequestProbing: any PullRequestProbing
     /// GitHub transport state injected process-wide by the app composition root.
+    let gitWorktreeService: GitWorktreeService
     /// The fallback initializer is retained for isolated `TabManager` tests.
     let pullRequestProbeService: PullRequestProbeService
 
@@ -472,6 +508,7 @@ class TabManager: ObservableObject {
         pullRequestProbeService: PullRequestProbeService? = nil,
         workspaceGitMetadataReader: (any WorkspaceGitMetadataReading)? = nil,
         gitPollClock: any GitPollClock = SystemGitPollClock(),
+        gitWorktreeService: GitWorktreeService = GitWorktreeService(),
         gitProbeLimiter: WorkspaceGitMetadataProbeLimiter? = nil,
         panelTitleUpdateCoalescer: NotificationBurstCoalescer? = nil,
         settings: any SettingsWriting = UserDefaultsSettingsClient(defaults: .standard),
@@ -480,10 +517,12 @@ class TabManager: ObservableObject {
     ) {
         self.settings = settings
         self.nativeSSHConnectionBroker = nativeSSHConnectionBroker
+        self.gitWorktreeService = gitWorktreeService
         self.panelTitleUpdateCoalescer = panelTitleUpdateCoalescer ?? NotificationBurstCoalescer()
         self.closeTabWarningDefaults = closeTabWarningDefaults
         workspaceReordering = WorkspaceReorderCoordinator(model: workspaces)
         workspaceGrouping = WorkspaceGroupCoordinator(model: workspaces)
+        workspaceContainerCoordinator = WorkspaceContainerCoordinator(model: workspaces)
 #if DEBUG
         let isTitleUpdateCoalescingEnabled = PanelTitleUpdateCoalescingSettings.isEnabled(settings: settings)
         let areTitleUpdateDiagnosticsEnabled = PanelTitleUpdateCoalescingSettings.diagnosticsEnabled(settings: settings)
@@ -535,12 +574,46 @@ class TabManager: ObservableObject {
         workspaces.attach(host: self)
         workspaceReordering.attach(host: self)
         workspaceGrouping.attach(host: self)
-        addWorkspace(
+        workspaceContainerCoordinator.attach(host: self)
+        let initialWorkspace = addWorkspace(
             title: initialWorkspaceTitle,
             workingDirectory: initialWorkingDirectory,
             initialTerminalInput: initialTerminalInput,
-            autoWelcomeIfNeeded: autoWelcomeIfNeeded
+            autoWelcomeIfNeeded: autoWelcomeIfNeeded,
+            normalizeWorkspaceNestingAfterInsert: false
         )
+        let initialGroupId = UUID()
+        let initialContainerId = UUID()
+        let normalizedInitialDirectory = initialWorkingDirectory?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasInitialDirectory = normalizedInitialDirectory?.isEmpty == false
+        initialWorkspace.workspaceContainerId = initialContainerId
+        workspaceGroups = [
+            WorkspaceGroup(
+                id: initialGroupId,
+                name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces"),
+                isCollapsed: false,
+                isPinned: false,
+                lastActiveWorkspaceId: initialWorkspace.id,
+                customColor: nil,
+                iconSymbol: nil
+            ),
+        ]
+        workspaceContainers = [
+            WorkspaceContainer(
+                id: initialContainerId,
+                groupId: initialGroupId,
+                name: hasInitialDirectory
+                    ? URL(fileURLWithPath: normalizedInitialDirectory!).lastPathComponent
+                    : String(localized: "workspaceContainer.localSession", defaultValue: "Local Session"),
+                kind: hasInitialDirectory ? .localDirectory : .localSession,
+                rootPath: hasInitialDirectory ? normalizedInitialDirectory : nil,
+                repositoryCommonDirectory: nil,
+                remoteHost: nil,
+                isCollapsed: false,
+                lastActiveWorkspaceId: initialWorkspace.id
+            ),
+        ]
         observers.append(NotificationCenter.default.addObserver(
             forName: .ghosttyDidSetTitle,
             object: nil,
@@ -1048,7 +1121,7 @@ class TabManager: ObservableObject {
         placementOverride: WorkspacePlacement? = nil,
         autoWelcomeIfNeeded: Bool = true,
         autoRefreshMetadata: Bool = true,
-        normalizeWorkspaceGroupsAfterInsert: Bool = true,
+        normalizeWorkspaceNestingAfterInsert: Bool = true,
         allowTextBoxFocusDefault: Bool = true
     ) -> Workspace {
         let sourceWorkspace = selectedWorkspace
@@ -1119,6 +1192,7 @@ class TabManager: ObservableObject {
                 to: newWorkspace,
                 from: sourceWorkspace ?? capturedTabs.first
             )
+            newWorkspace.boundRootPath = workingDirectory
             newWorkspace.owningTabManager = self
             if title != nil {
                 newWorkspace.setCustomTitle(title)
@@ -1136,11 +1210,15 @@ class TabManager: ObservableObject {
                 updatedTabs.append(newWorkspace)
             }
             tabs = updatedTabs
-            // The global insertion-index rules don't know about group sections.
-            // Re-run the group-aware normalize so a freshly-added workspace
-            // can't land inside another group's contiguous section.
-            if normalizeWorkspaceGroupsAfterInsert, !workspaceGroups.isEmpty {
-                workspaces.normalizeWorkspaceGroupContiguity()
+            if normalizeWorkspaceNestingAfterInsert, newWorkspace.workspaceContainerId == nil {
+                let hierarchySource = sourceWorkspace
+                    ?? snapshot.selectedTabId.flatMap { selectedId in updatedTabs.first(where: { $0.id == selectedId }) }
+                adoptStandaloneWorkspaceIntoHierarchy(newWorkspace, relativeTo: hierarchySource)
+            }
+            // Rebuild the three-level ordering after generic insertions so no
+            // leaf can split another root container's contiguous run.
+            if normalizeWorkspaceNestingAfterInsert, !workspaceContainers.isEmpty {
+                workspaces.normalizeWorkspaceNesting()
             }
             if autoRefreshMetadata, let terminalPanel = newWorkspace.focusedTerminalPanel {
                 scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
@@ -1183,6 +1261,34 @@ class TabManager: ObservableObject {
             }
             return newWorkspace
         }
+    }
+
+    private func adoptStandaloneWorkspaceIntoHierarchy(_ workspace: Workspace, relativeTo source: Workspace?) {
+        let sourceGroupId = source.flatMap { workspaces.group(forLeaf: $0.id)?.id }
+        let groupId = sourceGroupId
+            ?? workspaceGroups.first?.id
+            ?? createWorkspaceGroup(
+                name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces")
+            )!
+        let name = workspace.customTitle ?? workspace.title
+        workspace.boundRootPath = nil
+        let containerId = UUID()
+        workspace.workspaceContainerId = containerId
+        workspace.workspaceLeafRole = .compatibility
+        workspace.isManagedWorktree = false
+        workspaceContainers.append(
+            WorkspaceContainer(
+                id: containerId,
+                groupId: groupId,
+                name: name,
+                kind: workspace.isRemoteWorkspace ? .remoteSession : .localSession,
+                rootPath: nil,
+                repositoryCommonDirectory: nil,
+                remoteHost: workspace.remoteConfiguration?.destination,
+                isCollapsed: false,
+                lastActiveWorkspaceId: workspace.id
+            )
+        )
     }
 
     @MainActor
@@ -1558,80 +1664,80 @@ class TabManager: ObservableObject {
         workspaceReordering.reorderWorkspace(tabId: tabId, toIndex: targetIndex, isDragOperation: isDragOperation)
     }
 
-    func sidebarReorderWorkspaceIds(
+    func sidebarReorderLeafIds(
         forDraggedWorkspaceId draggedWorkspaceId: UUID?,
         targetWorkspaceId: UUID? = nil,
-        usesTopLevelRows: Bool = false
+        usesContainerRows: Bool = false
     ) -> [UUID] {
-        workspaceReordering.sidebarReorderWorkspaceIds(
+        workspaceReordering.sidebarReorderLeafIds(
             forDraggedWorkspaceId: draggedWorkspaceId,
             targetWorkspaceId: targetWorkspaceId,
-            usesTopLevelRows: usesTopLevelRows
+            usesContainerRows: usesContainerRows
         )
     }
 
-    func sidebarReorderPinnedWorkspaceIds(
+    func sidebarReorderPinnedLeafIds(
         forDraggedWorkspaceId draggedWorkspaceId: UUID?,
         targetWorkspaceId: UUID? = nil,
-        usesTopLevelRows: Bool = false
+        usesContainerRows: Bool = false
     ) -> Set<UUID> {
-        workspaceReordering.sidebarReorderPinnedWorkspaceIds(
+        workspaceReordering.sidebarReorderPinnedLeafIds(
             forDraggedWorkspaceId: draggedWorkspaceId,
             targetWorkspaceId: targetWorkspaceId,
-            usesTopLevelRows: usesTopLevelRows
+            usesContainerRows: usesContainerRows
         )
     }
 
     func sidebarReorderLegalInsertionRange(
         forDraggedWorkspaceId draggedWorkspaceId: UUID?,
         targetWorkspaceId: UUID? = nil,
-        usesTopLevelRows: Bool = false,
-        explicitGroupId: UUID? = nil
+        usesContainerRows: Bool = false,
+        explicitContainerId: UUID? = nil
     ) -> ClosedRange<Int>? {
         workspaceReordering.sidebarReorderLegalInsertionRange(
             forDraggedWorkspaceId: draggedWorkspaceId,
             targetWorkspaceId: targetWorkspaceId,
-            usesTopLevelRows: usesTopLevelRows,
-            explicitGroupId: explicitGroupId
+            usesContainerRows: usesContainerRows,
+            explicitContainerId: explicitContainerId
         )
     }
 
     @discardableResult
-    func reorderSidebarWorkspace(
+    func reorderSidebarRow(
         tabId: UUID,
         toIndex targetIndex: Int,
         isDragOperation: Bool = false,
-        usesTopLevelRows: Bool = false,
-        explicitGroupId: UUID? = nil
+        usesContainerRows: Bool = false,
+        explicitContainerId: UUID? = nil
     ) -> Bool {
-        workspaceReordering.reorderSidebarWorkspace(
+        workspaceReordering.reorderSidebarRow(
             tabId: tabId,
             toIndex: targetIndex,
             isDragOperation: isDragOperation,
-            usesTopLevelRows: usesTopLevelRows,
-            explicitGroupId: explicitGroupId
+            usesContainerRows: usesContainerRows,
+            explicitContainerId: explicitContainerId
         )
     }
 
-    func sidebarReorderUsesTopLevelRows(
+    func sidebarReorderUsesContainerRows(
         forDraggedWorkspaceId draggedWorkspaceId: UUID?,
         targetWorkspaceId: UUID?
     ) -> Bool {
-        workspaceReordering.sidebarReorderUsesTopLevelRows(
+        workspaceReordering.sidebarReorderUsesContainerRows(
             forDraggedWorkspaceId: draggedWorkspaceId,
             targetWorkspaceId: targetWorkspaceId
         )
     }
 
-    func sidebarReorderUsesTopLevelRows(
+    func sidebarReorderUsesContainerRows(
         forDraggedWorkspaceId draggedWorkspaceId: UUID?,
         targetWorkspaceId: UUID?,
-        workspaceGroupIdByWorkspaceId: [UUID: UUID?]
+        leafContainerIdByLeafId: [UUID: UUID?]
     ) -> Bool {
-        workspaceReordering.sidebarReorderUsesTopLevelRows(
+        workspaceReordering.sidebarReorderUsesContainerRows(
             forDraggedWorkspaceId: draggedWorkspaceId,
             targetWorkspaceId: targetWorkspaceId,
-            workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId
+            leafContainerIdByLeafId: leafContainerIdByLeafId
         )
     }
 
@@ -1744,75 +1850,32 @@ class TabManager: ObservableObject {
         workspaceReordering.setPinned(workspaceIds: workspaceIds, pinned: pinned)
     }
 
-    // MARK: - Workspace Groups (WorkspaceGroupCoordinator, CmuxWorkspaces)
+    // MARK: - Workspace hierarchy (CmuxWorkspaces)
 
-    @discardableResult
-    func createWorkspaceGroup(
-        name: String,
-        childWorkspaceIds: [UUID] = [],
-        anchorWorkingDirectory: String? = nil,
-        selectAnchor: Bool = true,
-        collapseSidebarSelection: Bool = true
-    ) -> UUID? {
-        workspaceGrouping.createWorkspaceGroup(
-            name: name,
-            childWorkspaceIds: childWorkspaceIds,
-            anchorWorkingDirectory: anchorWorkingDirectory,
-            selectAnchor: selectAnchor,
-            collapseSidebarSelection: collapseSidebarSelection
-        )
+    func workspaceContainer(for workspaceId: UUID) -> WorkspaceContainer? {
+        workspaces.container(forLeaf: workspaceId)
+    }
+
+    func workspaceGroup(for workspaceId: UUID) -> WorkspaceGroup? {
+        workspaces.group(forLeaf: workspaceId)
+    }
+
+    func workspaceLeaves(inContainer containerId: UUID) -> [Workspace] {
+        workspaces.leaves(inContainer: containerId)
     }
 
     @discardableResult
-    func createWorkspaceInGroup(
-        groupId: UUID,
-        placement explicitPlacement: WorkspaceGroupNewPlacement? = nil,
-        referenceWorkspaceId: UUID? = nil,
-        select: Bool = true,
-        initialSurface: NewWorkspaceInitialSurface = .terminal,
-        title: String? = nil,
-        initialBrowserURL: URL? = nil,
-        initialBrowserOmnibarVisible: Bool = true,
-        initialBrowserTransparentBackground: Bool = false
-    ) -> Workspace? {
-        workspaceGrouping.createWorkspaceInGroup(
-            groupId: groupId,
-            placement: explicitPlacement,
-            referenceWorkspaceId: referenceWorkspaceId,
-            select: select,
-            initialSurface: initialSurface,
-            title: title,
-            initialBrowserURL: initialBrowserURL,
-            initialBrowserOmnibarVisible: initialBrowserOmnibarVisible,
-            initialBrowserTransparentBackground: initialBrowserTransparentBackground
-        )
-    }
-
-    func addWorkspaceToGroup(
-        workspaceId: UUID,
-        groupId: UUID,
-        placement: WorkspaceGroupNewPlacement? = nil,
-        referenceWorkspaceId: UUID? = nil
-    ) {
-        workspaceGrouping.addWorkspaceToGroup(
-            workspaceId: workspaceId,
-            groupId: groupId,
-            placement: placement,
-            referenceWorkspaceId: referenceWorkspaceId
-        )
-    }
-
-    func removeWorkspaceFromGroup(workspaceId: UUID) {
-        workspaceGrouping.removeWorkspaceFromGroup(workspaceId: workspaceId)
-    }
-
-    func ungroupWorkspaceGroup(groupId: UUID) {
-        workspaceGrouping.ungroupWorkspaceGroup(groupId: groupId)
+    func createWorkspaceGroup(name: String, isPinned: Bool = false) -> UUID? {
+        workspaceGrouping.createWorkspaceGroup(name: name, isPinned: isPinned)
     }
 
     @discardableResult
-    func deleteWorkspaceGroup(groupId: UUID, recordHistory: Bool = true) -> Int {
-        workspaceGrouping.deleteWorkspaceGroup(groupId: groupId, recordHistory: recordHistory)
+    func deleteWorkspaceGroup(groupId: UUID) -> Bool {
+        workspaceGrouping.deleteWorkspaceGroup(groupId: groupId)
+    }
+
+    func workspaceGroupDeletionConfirmation(groupId: UUID) -> WorkspaceGroupDeletionConfirmation? {
+        workspaceGrouping.deletionConfirmation(groupId: groupId)
     }
 
     func renameWorkspaceGroup(groupId: UUID, name: String) {
@@ -1844,41 +1907,487 @@ class TabManager: ObservableObject {
         workspaceGrouping.setWorkspaceGroupIcon(groupId: groupId, symbol: symbol)
     }
 
-    func setWorkspaceGroupAnchor(groupId: UUID, workspaceId: UUID) {
-        workspaceGrouping.setWorkspaceGroupAnchor(groupId: groupId, workspaceId: workspaceId)
-    }
-
     func moveWorkspaceGroup(groupId: UUID, toIndex targetIndex: Int) {
         workspaceGrouping.moveWorkspaceGroup(groupId: groupId, toIndex: targetIndex)
     }
 
-    /// Compatibility shim. With anchor-bound group lifecycle, "empty" groups
-    /// are no longer possible — a group exists iff its anchor exists in
-    /// `tabs[]`.
-    func pruneEmptyWorkspaceGroups() {}
+    func selectWorkspaceGroupHeader(groupId: UUID) {
+        workspaceGrouping.selectGroupHeader(groupId: groupId)
+    }
 
-    // MARK: - WorkspaceGroupHosting (effects the group coordinator inverts)
-
-    func createGroupAnchorWorkspace(
-        title: String,
-        workingDirectory: String?,
-        inheritWorkingDirectory: Bool,
-        select: Bool
-    ) -> Workspace {
-        addWorkspace(
-            title: title,
-            workingDirectory: workingDirectory,
-            inheritWorkingDirectory: inheritWorkingDirectory,
-            select: select,
-            placementOverride: .top,
-            autoWelcomeIfNeeded: false,
-            normalizeWorkspaceGroupsAfterInsert: false
+    @discardableResult
+    func createWorkspaceContainer(
+        groupId: UUID,
+        name: String?,
+        kind: WorkspaceContainerKind,
+        rootPath: String?,
+        repositoryCommonDirectory: String? = nil,
+        remoteHost: String? = nil,
+        select: Bool = true
+    ) -> UUID? {
+        workspaceContainerCoordinator.createContainer(
+            groupId: groupId,
+            name: name,
+            kind: kind,
+            rootPath: rootPath,
+            repositoryCommonDirectory: repositoryCommonDirectory,
+            remoteHost: remoteHost,
+            mainLeafWorkingDirectory: rootPath,
+            select: select
         )
     }
 
-    func createWorkspaceForGroup(
+    func registerWorkspaceRoot(
+        groupId: UUID,
+        path: String,
+        select: Bool
+    ) async -> Result<WorkspaceRootRegistrationOutcome, WorkspaceRootRegistrationError> {
+        guard workspaceGroups.contains(where: { $0.id == groupId }) else {
+            return .failure(.missingGroup)
+        }
+        let selectedURL = URL(fileURLWithPath: path, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: selectedURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return .failure(.invalidDirectory(selectedURL.path))
+        }
+
+        switch await gitWorktreeService.resolveRepository(containing: selectedURL.path) {
+        case .bare(let path):
+            return .failure(.bareRepository(path))
+        case .notARepository:
+            if let existing = workspaceContainers.first(where: {
+                $0.rootPath.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } == selectedURL.path
+            }), let leaf = workspaces.resolveLastActiveLeaf(inContainer: existing.id) {
+                if let index = workspaceContainers.firstIndex(where: { $0.id == existing.id }) {
+                    workspaceContainers[index].isRootBroken = false
+                }
+                if select { selectWorkspace(leaf) }
+                return .success(.existing(containerId: existing.id, workspaceId: leaf.id))
+            }
+            guard let containerId = createWorkspaceContainer(
+                groupId: groupId,
+                name: selectedURL.lastPathComponent,
+                kind: .localDirectory,
+                rootPath: selectedURL.path,
+                select: false
+            ), let leaf = workspaces.resolveLastActiveLeaf(inContainer: containerId) else {
+                return .failure(.creationFailed)
+            }
+            leaf.boundRootPath = selectedURL.path
+            if select { selectWorkspace(leaf) }
+            return .success(.created(containerId: containerId, selectedWorkspaceId: leaf.id))
+
+        case .worktree(let repository):
+            let selectedRoot = repository.worktreeRoot
+            if let existing = workspaceContainers.first(where: {
+                $0.kind == .git && (
+                    $0.repositoryCommonDirectory == repository.commonDirectory ||
+                    $0.rootPath == repository.mainRoot
+                )
+            }) {
+                if let index = workspaceContainers.firstIndex(where: { $0.id == existing.id }) {
+                    workspaceContainers[index].isRootBroken = false
+                }
+                let linked = try? await gitWorktreeService.linkedWorktrees(in: repository)
+                let selectedEntry = linked?.first(where: { $0.path == selectedRoot })
+                let leaf = workspaceLeaves(inContainer: existing.id).first(where: {
+                    $0.boundRootPath == selectedRoot
+                }) ?? (selectedRoot == repository.mainRoot
+                    ? workspaces.mainLeaf(ofContainer: existing.id)
+                    : createWorkspaceLeaf(
+                        inContainer: existing.id,
+                        workingDirectory: selectedRoot,
+                        title: selectedEntry.map(Self.worktreeDisplayTitle),
+                        select: false
+                    ))
+                guard let leaf else { return .failure(.creationFailed) }
+                if let selectedEntry {
+                    Self.applyWorktreeBinding(
+                        selectedEntry,
+                        to: leaf,
+                        role: selectedRoot == repository.mainRoot ? .main : nil
+                    )
+                } else {
+                    leaf.boundRootPath = selectedRoot
+                    leaf.isWorktreeBindingBroken = false
+                }
+                if select { selectWorkspace(leaf) }
+                return .success(.existing(containerId: existing.id, workspaceId: leaf.id))
+            }
+
+            guard let containerId = createWorkspaceContainer(
+                groupId: groupId,
+                name: URL(fileURLWithPath: repository.mainRoot).lastPathComponent,
+                kind: .git,
+                rootPath: repository.mainRoot,
+                repositoryCommonDirectory: repository.commonDirectory,
+                select: false
+            ), let mainLeaf = workspaces.mainLeaf(ofContainer: containerId) else {
+                return .failure(.creationFailed)
+            }
+            mainLeaf.boundRootPath = repository.mainRoot
+            let linked = try? await gitWorktreeService.linkedWorktrees(in: repository)
+            if let mainEntry = linked?.first(where: \.isMainWorktree) {
+                mainLeaf.title = Self.worktreeDisplayTitle(mainEntry)
+                Self.applyWorktreeBinding(mainEntry, to: mainLeaf, role: .main)
+            }
+            let selectedLeaf: Workspace
+            if selectedRoot == repository.mainRoot {
+                selectedLeaf = mainLeaf
+            } else if let importedLeaf = createWorkspaceLeaf(
+                inContainer: containerId,
+                workingDirectory: selectedRoot,
+                title: linked?.first(where: { $0.path == selectedRoot }).map(Self.worktreeDisplayTitle),
+                select: false
+            ) {
+                selectedLeaf = importedLeaf
+                if let selectedEntry = linked?.first(where: { $0.path == selectedRoot }) {
+                    Self.applyWorktreeBinding(selectedEntry, to: importedLeaf, role: .external)
+                }
+            } else {
+                _ = removeWorkspaceContainer(containerId: containerId, recordHistory: false)
+                return .failure(.creationFailed)
+            }
+            if select { selectWorkspace(selectedLeaf) }
+            return .success(.created(containerId: containerId, selectedWorkspaceId: selectedLeaf.id))
+        }
+    }
+
+    func relocateWorkspaceContainer(
+        containerId: UUID,
+        to path: String
+    ) async -> Result<WorkspaceRootRegistrationOutcome, WorkspaceRootRegistrationError> {
+        guard let index = workspaceContainers.firstIndex(where: { $0.id == containerId }) else {
+            return .failure(.creationFailed)
+        }
+        let container = workspaceContainers[index]
+        guard container.isRootBroken else {
+            return .failure(.creationFailed)
+        }
+        let rootLeaf = container.kind == .git
+            ? workspaces.mainLeaf(ofContainer: containerId)
+            : workspaces.resolveLastActiveLeaf(inContainer: containerId)
+        guard let mainLeaf = rootLeaf else {
+            return .failure(.creationFailed)
+        }
+        let selectedURL = URL(fileURLWithPath: path, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: selectedURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return .failure(.invalidDirectory(selectedURL.path))
+        }
+
+        var rootPath = selectedURL.path
+        var commonDirectory: String?
+        var mainTitle = selectedURL.lastPathComponent
+        var mainWorktree: GitWorktree?
+        if workspaceContainers[index].kind == .git {
+            switch await gitWorktreeService.resolveRepository(containing: selectedURL.path) {
+            case .bare(let path): return .failure(.bareRepository(path))
+            case .notARepository: return .failure(.creationFailed)
+            case .worktree(let repository):
+                rootPath = repository.mainRoot
+                commonDirectory = repository.commonDirectory
+                mainWorktree = try? await gitWorktreeService.linkedWorktrees(in: repository)
+                    .first(where: \.isMainWorktree)
+                if let mainWorktree {
+                    mainTitle = Self.worktreeDisplayTitle(mainWorktree)
+                }
+            }
+        }
+        if let existing = workspaceContainers.first(where: {
+            $0.id != containerId && (
+                (commonDirectory != nil && $0.repositoryCommonDirectory == commonDirectory) ||
+                $0.rootPath == rootPath
+            )
+        }), let existingLeaf = workspaces.resolveLastActiveLeaf(inContainer: existing.id) {
+            return .success(.existing(containerId: existing.id, workspaceId: existingLeaf.id))
+        }
+
+        workspaceContainers[index].rootPath = rootPath
+        workspaceContainers[index].repositoryCommonDirectory = commonDirectory
+        workspaceContainers[index].name = URL(fileURLWithPath: rootPath).lastPathComponent
+        workspaceContainers[index].isRootBroken = false
+        if let mainWorktree {
+            Self.applyWorktreeBinding(mainWorktree, to: mainLeaf, role: .main)
+        } else {
+            mainLeaf.boundRootPath = rootPath
+            mainLeaf.workspaceLeafRole = workspaceContainers[index].kind == .git ? .main : .compatibility
+            mainLeaf.workspaceLeafHead = nil
+            mainLeaf.isWorktreeBindingBroken = false
+        }
+        mainLeaf.currentDirectory = rootPath
+        mainLeaf.title = mainTitle
+        return .success(.created(containerId: containerId, selectedWorkspaceId: mainLeaf.id))
+    }
+
+    private static func worktreeDisplayTitle(_ worktree: GitWorktree) -> String {
+        if let branch = worktree.branch, !branch.isEmpty { return branch }
+        if let head = worktree.head, !head.isEmpty { return String(head.prefix(8)) }
+        return URL(fileURLWithPath: worktree.path).lastPathComponent
+    }
+    private static func applyWorktreeBinding(
+        _ worktree: GitWorktree,
+        to workspace: Workspace,
+        role: WorkspaceLeafRole? = nil
+    ) {
+        if let role {
+            workspace.workspaceLeafRole = role
+        }
+        workspace.boundRootPath = worktree.path
+        if let branch = worktree.branch, !branch.isEmpty {
+            workspace.workspaceLeafHead = .branch(branch)
+        } else if worktree.isDetached {
+            workspace.workspaceLeafHead = .detached(commitish: worktree.head)
+        } else {
+            workspace.workspaceLeafHead = nil
+        }
+        workspace.isWorktreeBindingBroken = false
+        workspace.isManagedWorktree = workspace.workspaceLeafRole == .managed
+    }
+
+
+    @discardableResult
+    func createWorkspaceLeaf(
+        inContainer containerId: UUID,
+        workingDirectory: String?,
+        title: String?,
+        role: WorkspaceLeafRole = .external,
+        select: Bool = true
+    ) -> Workspace? {
+        guard workspaceContainers.contains(where: { $0.id == containerId }) else { return nil }
+        let workspace = addWorkspace(
+            title: title,
+            workingDirectory: workingDirectory,
+            inheritWorkingDirectory: false,
+            select: false,
+            autoWelcomeIfNeeded: false,
+            normalizeWorkspaceNestingAfterInsert: false
+        )
+        workspace.workspaceLeafRole = role
+        workspace.isManagedWorktree = role == .managed
+        
+        workspace.boundRootPath = workingDirectory
+        workspaceContainerCoordinator.attachLeaf(
+            workspaceId: workspace.id,
+            toContainer: containerId,
+            placement: .end,
+            referenceWorkspaceId: nil
+        )
+        if select { selectWorkspace(workspace) }
+        return workspace
+    }
+
+    func createManagedWorktree(
+        inContainer containerId: UUID,
+        branch: String,
+        select: Bool
+    ) async throws -> Workspace {
+        guard let container = workspaceContainers.first(where: { $0.id == containerId }) else {
+            throw ManagedWorktreeMutationError.missingContainer
+        }
+        guard container.kind == .git, let rootPath = container.rootPath else {
+            throw ManagedWorktreeMutationError.notGitContainer
+        }
+        guard case .worktree(let repository) = await gitWorktreeService.resolveRepository(containing: rootPath) else {
+            throw ManagedWorktreeMutationError.notGitContainer
+        }
+        do {
+            let linked = try await gitWorktreeService.linkedWorktrees(in: repository)
+            let selectedRoot = selectedWorkspace?.workspaceContainerId == containerId
+                ? selectedWorkspace?.boundRootPath
+                : nil
+            let base = selectedRoot.flatMap { root in linked.first(where: { $0.path == root })?.head }
+                ?? linked.first(where: \.isMainWorktree)?.head
+            guard let base, !base.isEmpty else {
+                throw ManagedWorktreeMutationError.unbornRepository
+            }
+            let created = try await gitWorktreeService.createWorktree(
+                in: repository,
+                branch: branch,
+                base: base
+            )
+            guard let workspace = createWorkspaceLeaf(
+                inContainer: containerId,
+                workingDirectory: created.path,
+                title: Self.worktreeDisplayTitle(created),
+                role: .managed,
+                select: false
+            ) else {
+                try? await gitWorktreeService.removeWorktree(in: repository, at: created.path, force: true)
+                throw ManagedWorktreeMutationError.missingContainer
+            }
+            Self.applyWorktreeBinding(created, to: workspace, role: .managed)
+            workspace.managedWorktreeBranch = created.branch ?? branch.trimmingCharacters(in: .whitespacesAndNewlines)
+            if select { selectWorkspace(workspace) }
+            return workspace
+        } catch let error as ManagedWorktreeMutationError {
+            throw error
+        } catch let error as CmuxGit.GitWorktreeError {
+            throw ManagedWorktreeMutationError.git(error)
+        }
+    }
+
+    func removeManagedWorktree(workspaceId: UUID, force: Bool = false) async throws {
+        guard let workspace = tabs.first(where: { $0.id == workspaceId }),
+              let containerId = workspace.workspaceContainerId,
+              let container = workspaceContainers.first(where: { $0.id == containerId }),
+              let rootPath = container.rootPath,
+              let worktreePath = workspace.boundRootPath else {
+            throw ManagedWorktreeMutationError.missingContainer
+        }
+        guard container.kind == .git else { throw ManagedWorktreeMutationError.notGitContainer }
+        guard !workspaces.isMainLeaf(workspaceId) else { throw ManagedWorktreeMutationError.mainWorktree }
+        guard workspace.isManagedWorktree else { throw ManagedWorktreeMutationError.unmanagedWorktree }
+        if let conflictingWindowId = AppDelegate.shared?.windowIdReferencingBoundRoot(
+            worktreePath,
+            excluding: self
+        ) {
+            throw ManagedWorktreeMutationError.crossWindowReference(windowId: conflictingWindowId)
+        }
+        guard case .worktree(let repository) = await gitWorktreeService.resolveRepository(containing: rootPath) else {
+            throw ManagedWorktreeMutationError.notGitContainer
+        }
+        do {
+            try await gitWorktreeService.removeWorktree(in: repository, at: worktreePath, force: force)
+            closeWorkspace(workspace, recordHistory: false)
+        } catch let error as CmuxGit.GitWorktreeError {
+            throw ManagedWorktreeMutationError.git(error)
+        }
+    }
+
+    func recreateManagedWorktree(workspaceId: UUID) async throws {
+        guard let workspace = tabs.first(where: { $0.id == workspaceId }),
+              workspace.isManagedWorktree,
+              let branch = workspace.managedWorktreeBranch,
+              let containerId = workspace.workspaceContainerId,
+              let rootPath = workspaceContainers.first(where: { $0.id == containerId })?.rootPath else {
+            throw ManagedWorktreeMutationError.missingManagedBranch
+        }
+        guard case .worktree(let repository) = await gitWorktreeService.resolveRepository(containing: rootPath) else {
+            throw ManagedWorktreeMutationError.notGitContainer
+        }
+        do {
+            let recreated = try await gitWorktreeService.recreateWorktree(in: repository, branch: branch)
+            Self.applyWorktreeBinding(recreated, to: workspace, role: .managed)
+            workspace.title = Self.worktreeDisplayTitle(recreated)
+        } catch let error as CmuxGit.GitWorktreeError {
+            throw ManagedWorktreeMutationError.git(error)
+        }
+    }
+
+    func removeExternalWorktreeLeaf(workspaceId: UUID) throws {
+        guard let workspace = tabs.first(where: { $0.id == workspaceId }) else {
+            throw ManagedWorktreeMutationError.missingContainer
+        }
+        guard !workspaces.isMainLeaf(workspaceId) else { throw ManagedWorktreeMutationError.mainWorktree }
+        guard !workspace.isManagedWorktree else { throw ManagedWorktreeMutationError.unmanagedWorktree }
+        closeWorkspace(workspace, recordHistory: false)
+    }
+    func deleteWorkspaceContainer(containerId: UUID, force: Bool = false) async throws {
+        guard let container = workspaceContainers.first(where: { $0.id == containerId }) else {
+            throw ManagedWorktreeMutationError.missingContainer
+        }
+        let managedLeaves = workspaceLeaves(inContainer: containerId).filter {
+            $0.workspaceLeafRole == .managed
+        }
+        for leaf in managedLeaves {
+            guard let worktreePath = leaf.boundRootPath else {
+                throw ManagedWorktreeMutationError.missingManagedBranch
+            }
+            if let conflictingWindowId = AppDelegate.shared?.windowIdReferencingBoundRoot(
+                worktreePath,
+                excluding: self
+            ) {
+                throw ManagedWorktreeMutationError.crossWindowReference(windowId: conflictingWindowId)
+            }
+        }
+
+        if !managedLeaves.isEmpty {
+            guard container.kind == .git,
+                  let rootPath = container.rootPath,
+                  case .worktree(let repository) = await gitWorktreeService.resolveRepository(containing: rootPath) else {
+                throw ManagedWorktreeMutationError.notGitContainer
+            }
+            for leaf in managedLeaves {
+                guard let worktreePath = leaf.boundRootPath else { continue }
+                do {
+                    try await gitWorktreeService.removeWorktree(
+                        in: repository,
+                        at: worktreePath,
+                        force: force
+                    )
+                    closeWorkspace(leaf, recordHistory: false)
+                } catch let error as CmuxGit.GitWorktreeError {
+                    leaf.isWorktreeBindingBroken = !FileManager.default.fileExists(atPath: worktreePath)
+                    throw ManagedWorktreeMutationError.git(error)
+                }
+            }
+        }
+        _ = removeWorkspaceContainer(containerId: containerId, recordHistory: false)
+    }
+
+
+    func attachWorkspaceLeaf(_ workspaceId: UUID, toContainer containerId: UUID) {
+        workspaceContainerCoordinator.attachLeaf(
+            workspaceId: workspaceId,
+            toContainer: containerId,
+            placement: .end,
+            referenceWorkspaceId: nil
+        )
+    }
+
+    func toggleWorkspaceContainerCollapsed(containerId: UUID) {
+        workspaceContainerCoordinator.toggleContainerCollapsed(containerId: containerId)
+    }
+
+    func setWorkspaceContainerCollapsed(containerId: UUID, isCollapsed: Bool) {
+        workspaceContainerCoordinator.setContainerCollapsed(containerId: containerId, isCollapsed: isCollapsed)
+    }
+
+    func renameWorkspaceContainer(containerId: UUID, name: String) {
+        workspaceContainerCoordinator.renameContainer(containerId: containerId, name: name)
+    }
+
+    func selectWorkspaceContainerHeader(containerId: UUID) {
+        workspaceContainerCoordinator.selectContainerHeader(containerId: containerId)
+    }
+    func moveWorkspaceContainer(containerId: UUID, toGroup groupId: UUID, toIndex targetIndex: Int) {
+        workspaceContainerCoordinator.moveContainer(
+            containerId: containerId,
+            toGroup: groupId,
+            toIndex: targetIndex
+        )
+    }
+
+
+    @discardableResult
+    func removeWorkspaceContainer(containerId: UUID, recordHistory: Bool = true) -> Int {
+        let memberCount = workspaceLeaves(inContainer: containerId).count
+        if memberCount > 0, memberCount == tabs.count {
+            _ = addWorkspace(
+                inheritWorkingDirectory: false,
+                select: true,
+                autoWelcomeIfNeeded: false
+            )
+        }
+        return workspaceContainerCoordinator.removeContainer(
+            containerId: containerId,
+            recordHistory: recordHistory
+        )
+    }
+
+    // MARK: - WorkspaceGroupHosting
+
+    func createWorkspaceForContainer(
         title: String?,
         workingDirectory: String?,
+        role: WorkspaceLeafRole,
         initialSurface: NewWorkspaceInitialSurface,
         initialBrowserURL: URL?,
         initialBrowserOmnibarVisible: Bool,
@@ -1886,7 +2395,7 @@ class TabManager: ObservableObject {
         inheritWorkingDirectory: Bool,
         select: Bool
     ) -> Workspace {
-        addWorkspace(
+        let workspace = addWorkspace(
             title: title,
             workingDirectory: workingDirectory,
             initialSurface: initialSurface,
@@ -1895,20 +2404,24 @@ class TabManager: ObservableObject {
             initialBrowserTransparentBackground: initialBrowserTransparentBackground,
             inheritWorkingDirectory: inheritWorkingDirectory,
             select: select,
-            autoWelcomeIfNeeded: false
+            autoWelcomeIfNeeded: false,
+            normalizeWorkspaceNestingAfterInsert: false
         )
+        workspace.workspaceLeafRole = role
+        workspace.isManagedWorktree = role == .managed
+        return workspace
     }
 
-    func closeWorkspaceForGroupDeletion(_ tab: Workspace, recordHistory: Bool) {
-        closeWorkspace(tab, recordHistory: recordHistory)
+    func closeWorkspaceForContainer(_ tab: Workspace, recordHistory: Bool) {
+        closeWorkspace(tab, recordHistory: recordHistory, allowMainLeafRemoval: true)
     }
 
-    func collapseSidebarSelectionForGroupCreation(
+    func collapseSidebarSelectionForContainerCreation(
         hiddenWorkspaceIds: Set<UUID>,
-        anchorId: UUID
+        focusLeafId: UUID
     ) {
-        sidebarMultiSelection.replaceSelection(with: [anchorId])
-        sidebarMultiSelection.postDidHide(hiddenWorkspaceIds: hiddenWorkspaceIds, focusedWorkspaceId: anchorId)
+        sidebarMultiSelection.replaceSelection(with: [focusLeafId])
+        sidebarMultiSelection.postDidHide(hiddenWorkspaceIds: hiddenWorkspaceIds, focusedWorkspaceId: focusLeafId)
     }
 
     func subtractSidebarSelection(
@@ -1923,13 +2436,10 @@ class TabManager: ObservableObject {
     }
 
     var localizedAutoGroupNameFormat: String {
-        String(
-            localized: "workspaceGroup.autoName.numbered",
-            defaultValue: "Group %lld"
-        )
+        String(localized: "workspaceGroup.autoName.numbered", defaultValue: "Group %lld")
     }
 
-    var defaultNewWorkspacePlacementInGroup: WorkspaceGroupNewPlacement {
+    var defaultNewWorkspacePlacementInContainer: WorkspaceGroupNewPlacement {
         settings.value(for: settingsCatalog.workspaceGroups.newWorkspacePlacement)
     }
 
@@ -2001,7 +2511,12 @@ class TabManager: ObservableObject {
         )
     }
 
-    func closeWorkspace(_ workspace: Workspace, recordHistory: Bool = true) {
+    func closeWorkspace(
+        _ workspace: Workspace,
+        recordHistory: Bool = true,
+        allowMainLeafRemoval: Bool = false
+    ) {
+        guard allowMainLeafRemoval || !workspaces.isMainLeaf(workspace.id) else { return }
         guard tabs.count > 1 else { return }
         panelTitleUpdateCoalescer.flushNow()
         sentryBreadcrumb("workspace.close", data: ["tabCount": tabs.count - 1])
@@ -2047,12 +2562,7 @@ class TabManager: ObservableObject {
 
         if let index = tabs.firstIndex(where: { $0.id == workspace.id }) {
             tabs.remove(at: index)
-            // Real-close path: if the closed workspace anchored a group, the
-            // group dissolves now and its remaining members survive as
-            // ungrouped workspaces. This lives at the explicit close site (not
-            // in the tabs didSet) so transient remove/insert reorders never
-            // trigger dissolve.
-            workspaces.dissolveGroupsAnchoredBy(closedWorkspaceId: workspace.id)
+            workspaces.handleLeafRemoved(workspace.id)
 
             if selectedTabId == workspace.id {
                 // Keep the "focused index" stable when possible:
@@ -2076,14 +2586,9 @@ class TabManager: ObservableObject {
         invalidateFocusHistoryTarget(workspaceId: tabId, panelId: nil)
 
         let removed = tabs.remove(at: index)
-        // Same anchor-close lifecycle as closeWorkspace: detaching a group's
-        // anchor dissolves the group; non-anchor members stay in tabs as
-        // ungrouped workspaces.
-        workspaces.dissolveGroupsAnchoredBy(closedWorkspaceId: removed.id)
-        // Clear the detached workspace's own group membership so the
-        // destination window — which has no matching WorkspaceGroup — doesn't
-        // render it as an orphaned indented row with stale grouping state.
-        removed.groupId = nil
+        workspaces.handleLeafRemoved(removed.id)
+        // Window-local hierarchy identities never cross a window boundary.
+        removed.workspaceContainerId = nil
         unwireClosedBrowserTracking(for: removed)
         browserModel.removeClosedBrowserPanels(forWorkspaceId: removed.id)
         removed.owningTabManager = nil
@@ -2112,13 +2617,7 @@ class TabManager: ObservableObject {
             return max(0, min(index, tabs.count))
         }()
         tabs.insert(workspace, at: insertIndex)
-        // A workspace moved in from another window arrives ungrouped (detach
-        // clears `groupId`) and may be pinned, so an arbitrary insert index can
-        // split a destination group's contiguous run or drop a pinned workspace
-        // below unpinned ones. Re-run the same normalization every insertion
-        // path uses so the destination's sidebar invariants — leading pinned
-        // segment, contiguous group runs — hold regardless of the drop index.
-        workspaces.normalizeWorkspaceGroupContiguity()
+        workspaces.normalizeWorkspaceNesting()
         if select {
             selectedTabId = workspace.id
         }
@@ -2274,35 +2773,6 @@ class TabManager: ObservableObject {
 
         for workspace in plan.workspaces {
             guard tabs.contains(where: { $0.id == workspace.id }) else { continue }
-            // Anchor-close confirms inside closeWorkspaceIfRunningProcess.
-            // If the user cancels that dialog during a batch, abort the
-            // whole batch — otherwise the loop keeps closing later items
-            // even though the user said "no" to the dialog that was up.
-            if let groupId = workspace.groupId,
-               let group = workspaceGroups.first(where: { $0.id == groupId }),
-               group.anchorWorkspaceId == workspace.id,
-               !settings.value(for: settingsCatalog.workspaceGroups.anchorCloseSuppressed) {
-                let otherMemberCount = tabs.reduce(0) { partial, tab in
-                    tab.groupId == groupId && tab.id != workspace.id ? partial + 1 : partial
-                }
-                if !confirmAnchorWorkspaceClose(groupName: group.name, otherMemberCount: otherMemberCount) {
-                    return
-                }
-                // Anchor confirmed (or suppressed); skip the inner re-prompt
-                // by closing without going through closeWorkspaceIfRunningProcess.
-                if tabs.count <= 1 {
-                    // Mirror close detaches from the remote session (retained no-op).
-                    markRemoteTmuxKillOnWindowCloseIfNeeded(for: [workspace])
-                    if let window {
-                        window.performClose(nil)
-                    } else {
-                        AppDelegate.shared?.closeMainWindowContainingTabId(workspace.id)
-                    }
-                } else {
-                    closeWorkspace(workspace)
-                }
-                continue
-            }
             _ = closeWorkspaceIfRunningProcess(workspace, requiresConfirmation: false)
         }
     }
@@ -2521,21 +2991,6 @@ class TabManager: ObservableObject {
         requiresConfirmation: Bool = true,
         source: CloseConfirmationSource = .workspace
     ) -> Bool {
-        // Anchor-close ALWAYS prompts (subject to its own
-        // workspaceGroups.anchorCloseSuppressed flag), regardless of
-        // requiresConfirmation. Batch-close paths set requiresConfirmation=false
-        // after their own generic prompt, but that generic prompt doesn't
-        // mention group dissolution — silently ungrouping members during a
-        // multi-close would be surprising. The "Don't ask again" toggle on
-        // the anchor dialog is the user's opt-out.
-        if let groupId = workspace.groupId,
-           let group = workspaceGroups.first(where: { $0.id == groupId }),
-           group.anchorWorkspaceId == workspace.id {
-            let otherMemberCount = tabs.reduce(0) { partial, tab in
-                tab.groupId == groupId && tab.id != workspace.id ? partial + 1 : partial
-            }
-            if !confirmAnchorWorkspaceClose(groupName: group.name, otherMemberCount: otherMemberCount) { return false }
-        }
         let willCloseWindow = tabs.count <= 1
         let needsCloseConfirmation = workspaceNeedsConfirmClose(workspace)
         if requiresConfirmation,
@@ -2582,82 +3037,6 @@ class TabManager: ObservableObject {
         }
     }
 
-    /// Confirm before closing a workspace that is its group's anchor. Closing
-    /// the anchor dissolves the group (other members survive ungrouped).
-    /// "Don't ask again" sets the `workspaceGroups.anchorCloseSuppressed` flag.
-    private func confirmAnchorWorkspaceClose(groupName: String, otherMemberCount: Int) -> Bool {
-        if settings.value(for: settingsCatalog.workspaceGroups.anchorCloseSuppressed) {
-            return true
-        }
-        // Do NOT acquire beginCloseConfirmationSession here. The standard
-        // close confirmation path that runs immediately after (confirmClose())
-        // gates itself with the same flag, and endCloseConfirmationSession
-        // releases the flag asynchronously on the next main-queue turn — so
-        // wrapping this dialog with begin/end would leave the flag set when
-        // the inner confirmClose runs, causing it to return false and silently
-        // refuse the close even after the user accepted both prompts.
-        let title = String(
-            localized: "dialog.closeAnchor.title",
-            defaultValue: "Close this workspace?"
-        )
-        // Use printf-style format specifiers and String(format:) so the
-        // catalog entry can substitute the group name and member count at
-        // runtime. Embedding Swift `\(groupName)` interpolation in the
-        // catalog `value` would render literal `\(groupName)` on lookup.
-        let message: String
-        if otherMemberCount == 0 {
-            let format = String(
-                localized: "dialog.closeAnchor.message.lone",
-                defaultValue: "Closing this workspace will remove the group \u{201C}%@\u{201D}."
-            )
-            message = String.localizedStringWithFormat(format, groupName)
-        } else if otherMemberCount == 1 {
-            let format = String(
-                localized: "dialog.closeAnchor.message.one",
-                defaultValue: "Closing this workspace will ungroup \u{201C}%@\u{201D} and release 1 other workspace."
-            )
-            message = String.localizedStringWithFormat(format, groupName)
-        } else {
-            let format = String(
-                localized: "dialog.closeAnchor.message.many",
-                defaultValue: "Closing this workspace will ungroup \u{201C}%1$@\u{201D} and release %2$lld other workspaces."
-            )
-            message = String.localizedStringWithFormat(format, groupName, otherMemberCount)
-        }
-
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: String(localized: "dialog.closeTab.close", defaultValue: "Close"))
-        alert.addButton(withTitle: String(localized: "dialog.closeTab.cancel", defaultValue: "Cancel"))
-        let suppressionButton = NSButton(
-            checkboxWithTitle: String(
-                localized: "dialog.dontAskAgain",
-                defaultValue: "Don\u{2019}t ask again"
-            ),
-            target: nil,
-            action: nil
-        )
-        suppressionButton.state = .off
-        alert.accessoryView = suppressionButton
-        if let closeButton = alert.buttons.first {
-            closeButton.keyEquivalent = "\r"
-            closeButton.keyEquivalentModifierMask = []
-            alert.window.defaultButtonCell = closeButton.cell as? NSButtonCell
-            alert.window.initialFirstResponder = closeButton
-        }
-        if let cancelButton = alert.buttons.dropFirst().first {
-            cancelButton.keyEquivalent = "\u{1b}"
-        }
-
-        let response = runCloseConfirmationAlert(alert)
-        guard response == .alertFirstButtonReturn else { return false }
-        if suppressionButton.state == .on {
-            settings.set(true, for: settingsCatalog.workspaceGroups.anchorCloseSuppressed)
-        }
-        return true
-    }
 
     private func confirmPinnedWorkspaceClose(source: CloseConfirmationSource) -> Bool {
         guard shouldConfirmClose(requiresConfirmation: true, source: source) else { return true }
@@ -3244,6 +3623,10 @@ class TabManager: ObservableObject {
         _ tabId: UUID,
         notificationDismissalContext: NotificationDismissalContext?
     ) {
+        if notificationDismissalContext != nil,
+           let workspace = tabs.first(where: { $0.id == tabId }) {
+            _ = workspace.activateDormantWorkspaceIfNeeded()
+        }
         guard selectedTabId != tabId else {
             notificationDismissal.setPendingSelectionContext(nil)
             if let notificationDismissalContext {
@@ -4176,19 +4559,36 @@ class TabManager: ObservableObject {
             closeWorkspace(workspace, recordHistory: false)
             return false
         }
-        // The snapshot may carry a groupId for a group that no longer exists
-        // in this TabManager (e.g. the group was dissolved between close and
-        // reopen). Drop those stale references so the restored workspace
-        // doesn't render as an orphaned indented row under no header.
-        if let groupId = workspace.groupId,
-           !workspaceGroups.contains(where: { $0.id == groupId }) {
-            workspace.groupId = nil
+        if workspace.workspaceContainerId.map({ id in workspaceContainers.contains(where: { $0.id == id }) }) != true {
+            let groupId = selectedTabId.flatMap { workspaces.group(forLeaf: $0)?.id }
+                ?? workspaceGroups.first?.id
+                ?? createWorkspaceGroup(
+                    name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces")
+                )!
+            let containerId = UUID()
+            let rootPath = workspace.boundRootPath ?? {
+                let current = workspace.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+                return current.isEmpty ? nil : current
+            }()
+            workspace.workspaceContainerId = containerId
+            workspaceContainers.append(
+                WorkspaceContainer(
+                    id: containerId,
+                    groupId: groupId,
+                    name: rootPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+                        ?? String(localized: "workspaceContainer.localSession", defaultValue: "Local Session"),
+                    kind: entry.snapshot.remote == nil
+                        ? (rootPath == nil ? .localSession : .localDirectory)
+                        : .remoteSession,
+                    rootPath: rootPath,
+                    repositoryCommonDirectory: nil,
+                    remoteHost: entry.snapshot.remote?.destination,
+                    isCollapsed: false,
+                    lastActiveWorkspaceId: workspace.id
+                )
+            )
         }
-        // When the group DOES still exist, the workspace is about to be
-        // reinserted at its old absolute index, which may now sit inside a
-        // different group section after intervening reorders. Renormalize
-        // so the restored member lands beside its group.
-        let needsNormalize = workspace.groupId != nil && !workspaceGroups.isEmpty
+        let needsNormalize = workspace.workspaceContainerId != nil && !workspaceContainers.isEmpty
         ClosedItemHistoryStore.shared.remapPanelWorkspaceIds(
             from: entry.workspaceId,
             to: workspace.id,
@@ -4201,7 +4601,7 @@ class TabManager: ObservableObject {
             tabs.insert(removed, at: insertIndex)
         }
         if needsNormalize {
-            workspaces.normalizeWorkspaceGroupContiguity()
+            workspaces.normalizeWorkspaceNesting()
         }
 
         withFocusHistoryRecordingSuppressed {
@@ -5570,24 +5970,49 @@ extension TabManager {
         hasher.combine(selectedTabId)
         hasher.combine(tabs.count)
         let notificationStore = AppDelegate.shared?.notificationStore
-        // Workspace groups participate in the session snapshot, so changes
-        // that only touch group metadata (rename / collapse / pin a group,
-        // or move a workspace between groups without reordering tabs) must
-        // bump the fingerprint or the autosave timer skips the write.
+        // The complete three-level hierarchy participates in the session snapshot.
+        // Metadata-only mutations must bump the fingerprint or autosave skips them.
         hasher.combine(workspaceGroups.count)
         for group in workspaceGroups {
             hasher.combine(group.id)
             hasher.combine(group.name)
             hasher.combine(group.isCollapsed)
             hasher.combine(group.isPinned)
-            hasher.combine(group.anchorWorkspaceId)
+            hasher.combine(group.lastActiveWorkspaceId)
             hasher.combine(group.customColor ?? "")
             hasher.combine(group.iconSymbol ?? "")
         }
+        hasher.combine(workspaceContainers.count)
+        for container in workspaceContainers {
+            hasher.combine(container.id)
+            hasher.combine(container.groupId)
+            hasher.combine(container.name)
+            hasher.combine(container.kind.rawValue)
+            hasher.combine(container.rootPath ?? "")
+            hasher.combine(container.repositoryCommonDirectory ?? "")
+            hasher.combine(container.remoteHost ?? "")
+            hasher.combine(container.isRootBroken)
+            hasher.combine(container.isCollapsed)
+            hasher.combine(container.lastActiveWorkspaceId)
+        }
         for workspace in tabs.prefix(SessionPersistencePolicy.maxWorkspacesPerWindow) {
             hasher.combine(workspace.id)
-            hasher.combine(workspace.groupId)
-            hasher.combine(workspace.focusedPanelId)
+            hasher.combine(workspace.workspaceContainerId)
+            hasher.combine(workspace.boundRootPath ?? "")
+            hasher.combine(workspace.isManagedWorktree)
+            hasher.combine(workspace.managedWorktreeBranch ?? "")
+            hasher.combine(workspace.workspaceLeafRole.rawValue)
+            switch workspace.workspaceLeafHead {
+            case .branch(let branch):
+                hasher.combine("branch")
+                hasher.combine(branch)
+            case .detached(let commitish):
+                hasher.combine("detached")
+                hasher.combine(commitish ?? "")
+            case nil:
+                hasher.combine("none")
+            }
+            hasher.combine(workspace.isWorktreeBindingBroken)
             hasher.combine(workspace.currentDirectory)
             hasher.combine(workspace.customTitle ?? "")
             hasher.combine(workspace.customDescription ?? "")
@@ -5846,55 +6271,63 @@ extension TabManager {
         surfaceResumeBindingIndex: SurfaceResumeBindingIndex? = nil
     ) -> SessionTabManagerSnapshot {
         panelTitleUpdateCoalescer.flushNow()
-        let restorableTabs = tabs
-            .filter(\.isRestorableInSessionSnapshot)
-            .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
-        let workspaceSnapshots = restorableTabs
-            .map {
-                $0.sessionSnapshot(
-                    includeScrollback: includeScrollback,
-                    restorableAgentIndex: restorableAgentIndex,
-                    surfaceResumeBindingIndex: surfaceResumeBindingIndex
-                )
-            }
-        let selectedWorkspaceIndex = selectedTabId.flatMap { selectedTabId in
-            restorableTabs.firstIndex(where: { $0.id == selectedTabId })
+        let restorableTabs = Array(
+            tabs
+                .filter(\.isRestorableInSessionSnapshot)
+                .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
+        )
+        let workspaceSnapshots = restorableTabs.map {
+            $0.sessionSnapshot(
+                includeScrollback: includeScrollback,
+                restorableAgentIndex: restorableAgentIndex,
+                surfaceResumeBindingIndex: surfaceResumeBindingIndex
+            )
         }
-        let occupiedGroupIds = Set(restorableTabs.compactMap(\.groupId))
-        // Build a per-group ordered list of restorable member IDs so we can
-        // record the anchor's index (restore-stable across UUID rotation).
-        let restorableMembersByGroupId: [UUID: [UUID]] = {
-            var map: [UUID: [UUID]] = [:]
-            for tab in restorableTabs {
-                if let gid = tab.groupId {
-                    map[gid, default: []].append(tab.id)
-                }
+        let workspaceIndexById = Dictionary(
+            uniqueKeysWithValues: restorableTabs.enumerated().map { ($0.element.id, $0.offset) }
+        )
+        let selectedWorkspaceIndex = selectedTabId.flatMap { workspaceIndexById[$0] }
+        let knownGroupIds = Set(workspaceGroups.map(\.id))
+        let occupiedContainerIds = Set(restorableTabs.compactMap(\.workspaceContainerId))
+        let containerSnapshots = workspaceContainers.compactMap { container -> SessionWorkspaceContainerSnapshot? in
+            guard knownGroupIds.contains(container.groupId),
+                  occupiedContainerIds.contains(container.id) else { return nil }
+            return SessionWorkspaceContainerSnapshot(
+                id: container.id,
+                groupId: container.groupId,
+                name: container.name,
+                kind: container.kind,
+                rootPath: container.rootPath,
+                repositoryCommonDirectory: container.repositoryCommonDirectory,
+                remoteHost: container.remoteHost,
+                isRootBroken: container.isRootBroken,
+                isCollapsed: container.isCollapsed,
+                lastActiveWorkspaceId: container.lastActiveWorkspaceId.flatMap { workspaceIndexById[$0] == nil ? nil : $0 }
+            )
+        }
+        let persistedContainerIds = Set(containerSnapshots.map(\.id))
+        let groupSnapshots = workspaceGroups.map { group in
+            let lastActiveWorkspaceId = group.lastActiveWorkspaceId.flatMap { workspaceId -> UUID? in
+                guard let workspace = restorableTabs.first(where: { $0.id == workspaceId }),
+                      let containerId = workspace.workspaceContainerId,
+                      persistedContainerIds.contains(containerId) else { return nil }
+                return workspaceId
             }
-            return map
-        }()
-        let groupSnapshots: [SessionWorkspaceGroupSnapshot]? = {
-            let snapshots = workspaceGroups
-                .filter { occupiedGroupIds.contains($0.id) }
-                .map { group in
-                    let memberIds = restorableMembersByGroupId[group.id] ?? []
-                    let anchorIndex = memberIds.firstIndex(of: group.anchorWorkspaceId)
-                    return SessionWorkspaceGroupSnapshot(
-                        id: group.id,
-                        name: group.name,
-                        isCollapsed: group.isCollapsed,
-                        anchorWorkspaceId: group.anchorWorkspaceId,
-                        anchorMemberIndex: anchorIndex,
-                        isPinned: group.isPinned,
-                        customColor: group.customColor,
-                        iconSymbol: group.iconSymbol
-                    )
-                }
-            return snapshots.isEmpty ? nil : snapshots
-        }()
+            return SessionWorkspaceGroupSnapshot(
+                id: group.id,
+                name: group.name,
+                isCollapsed: group.isCollapsed,
+                lastActiveWorkspaceId: lastActiveWorkspaceId,
+                isPinned: group.isPinned,
+                customColor: group.customColor,
+                iconSymbol: group.iconSymbol
+            )
+        }
         return SessionTabManagerSnapshot(
             selectedWorkspaceIndex: selectedWorkspaceIndex,
             workspaces: workspaceSnapshots,
-            workspaceGroups: groupSnapshots
+            workspaceGroups: groupSnapshots.isEmpty ? nil : groupSnapshots,
+            workspaceContainers: containerSnapshots.isEmpty ? nil : containerSnapshots
         )
     }
 
@@ -5992,8 +6425,9 @@ extension TabManager {
             snapshot.workspaces.prefix(SessionPersistencePolicy.maxWorkspacesPerWindow),
             selectedWorkspaceIndex: snapshot.selectedWorkspaceIndex
         )
-        let workspaceSnapshots = normalizedWorkspaceSnapshots
-            .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
+        let workspaceSnapshots = Array(
+            normalizedWorkspaceSnapshots.prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
+        )
         var restoredOriginalWorkspaceIds: [UUID?] = []
         for workspaceSnapshot in workspaceSnapshots {
             let ordinal = Self.nextPortOrdinal
@@ -6037,57 +6471,208 @@ extension TabManager {
             newSelectedId = newTabs.first?.id
         }
 
-        // Single atomic assignment of @Published properties so SwiftUI observers
-        // never see an intermediate state with empty tabs or nil selection.
-        tabs = newTabs
-        let restoredGroups: [WorkspaceGroup] = {
-            guard let groupSnapshots = snapshot.workspaceGroups else { return [] }
-            let workspaceIdsByGroupId: [UUID: [UUID]] = {
-                var map: [UUID: [UUID]] = [:]
-                for workspace in newTabs {
-                    if let gid = workspace.groupId {
-                        map[gid, default: []].append(workspace.id)
-                    }
-                }
-                return map
-            }()
-            var seen: Set<UUID> = []
-            return groupSnapshots.compactMap { groupSnapshot in
-                guard let members = workspaceIdsByGroupId[groupSnapshot.id], !members.isEmpty,
-                      seen.insert(groupSnapshot.id).inserted else { return nil }
-                // Resolve anchor: prefer the restore-stable index (since each
-                // restored workspace gets a fresh UUID, the old
-                // anchorWorkspaceId rarely matches). Fall back to the in-process
-                // UUID hint, then to "first member by tab order" for very old
-                // snapshots that pre-date both fields.
-                let anchorId: UUID = {
-                    if let index = groupSnapshot.anchorMemberIndex,
-                       members.indices.contains(index) {
-                        return members[index]
-                    }
-                    if let stored = groupSnapshot.anchorWorkspaceId, members.contains(stored) {
-                        return stored
-                    }
-                    return members[0]
-                }()
-                return WorkspaceGroup(
+        let workspaceIdByOriginalId: [UUID: UUID] = Dictionary(
+            uniqueKeysWithValues: zip(restoredOriginalWorkspaceIds, newTabs).compactMap { originalId, workspace in
+                originalId.map { ($0, workspace.id) }
+            }
+        )
+        var restoredGroups: [WorkspaceGroup] = []
+        var seenGroupIds = Set<UUID>()
+        for groupSnapshot in snapshot.workspaceGroups ?? [] where seenGroupIds.insert(groupSnapshot.id).inserted {
+            restoredGroups.append(
+                WorkspaceGroup(
                     id: groupSnapshot.id,
                     name: groupSnapshot.name,
                     isCollapsed: groupSnapshot.isCollapsed,
                     isPinned: groupSnapshot.isPinned ?? false,
-                    anchorWorkspaceId: anchorId,
+                    lastActiveWorkspaceId: groupSnapshot.lastActiveWorkspaceId.flatMap { workspaceIdByOriginalId[$0] },
                     customColor: groupSnapshot.customColor,
                     iconSymbol: groupSnapshot.iconSymbol
                 )
-            }
-        }()
-        // Clear any group references on restored workspaces that no longer correspond
-        // to a known group (older snapshots, manual edits, etc.).
-        let knownGroupIds = Set(restoredGroups.map(\.id))
-        for workspace in newTabs where workspace.groupId.map({ !knownGroupIds.contains($0) }) ?? false {
-            workspace.groupId = nil
+            )
         }
+
+        var fallbackGroupId: UUID?
+        let ensureFallbackGroup: () -> UUID = {
+            if let fallbackGroupId { return fallbackGroupId }
+            let id = UUID()
+            restoredGroups.append(
+                WorkspaceGroup(
+                    id: id,
+                    name: String(localized: "workspaceGroup.migrated.defaultName", defaultValue: "Workspaces"),
+                    isCollapsed: false,
+                    isPinned: false,
+                    lastActiveWorkspaceId: nil,
+                    customColor: nil,
+                    iconSymbol: nil
+                )
+            )
+            fallbackGroupId = id
+            return id
+        }
+        let containerName: (Workspace, SessionWorkspaceSnapshot) -> String = { workspace, workspaceSnapshot in
+            let path = workspaceSnapshot.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !path.isEmpty {
+                let candidate = URL(fileURLWithPath: path).lastPathComponent
+                if !candidate.isEmpty { return candidate }
+            }
+            let title = (workspace.customTitle ?? workspace.title).trimmingCharacters(in: .whitespacesAndNewlines)
+            return title.isEmpty
+                ? String(localized: "workspaceContainer.untitled", defaultValue: "Workspace")
+                : title
+        }
+        var restoredContainers: [WorkspaceContainer] = []
+        if let containerSnapshots = snapshot.workspaceContainers {
+            var seenContainerIds = Set<UUID>()
+            let knownGroupIds = Set(restoredGroups.map(\.id))
+            for containerSnapshot in containerSnapshots
+            where knownGroupIds.contains(containerSnapshot.groupId)
+                && seenContainerIds.insert(containerSnapshot.id).inserted {
+                restoredContainers.append(
+                    WorkspaceContainer(
+                        id: containerSnapshot.id,
+                        groupId: containerSnapshot.groupId,
+                        name: containerSnapshot.name,
+                        kind: containerSnapshot.kind,
+                        rootPath: containerSnapshot.rootPath,
+                        repositoryCommonDirectory: containerSnapshot.repositoryCommonDirectory,
+                        remoteHost: containerSnapshot.remoteHost,
+                        isCollapsed: containerSnapshot.isCollapsed,
+                        lastActiveWorkspaceId: containerSnapshot.lastActiveWorkspaceId.flatMap { workspaceIdByOriginalId[$0] },
+                        isRootBroken: containerSnapshot.isRootBroken ?? false
+                    )
+                )
+            }
+            let validContainerIds = Set(restoredContainers.map(\.id))
+            for (index, workspace) in newTabs.enumerated() {
+                guard workspace.workspaceContainerId.map(validContainerIds.contains) != true else { continue }
+                let groupId = ensureFallbackGroup()
+                let workspaceSnapshot = workspaceSnapshots.indices.contains(index)
+                    ? workspaceSnapshots[index]
+                    : workspace.sessionSnapshot(includeScrollback: false)
+                let containerId = UUID()
+                workspace.workspaceContainerId = containerId
+                restoredContainers.append(
+                    WorkspaceContainer(
+                        id: containerId,
+                        groupId: groupId,
+                        name: containerName(workspace, workspaceSnapshot),
+                        kind: workspaceSnapshot.remote == nil
+                            ? (workspaceSnapshot.currentDirectory.isEmpty ? .localSession : .localDirectory)
+                            : .remoteSession,
+                        rootPath: workspaceSnapshot.currentDirectory.isEmpty ? nil : workspaceSnapshot.currentDirectory,
+                        repositoryCommonDirectory: nil,
+                        remoteHost: workspaceSnapshot.remote?.destination,
+                        isCollapsed: false,
+                        lastActiveWorkspaceId: workspace.id
+                    )
+                )
+            }
+        } else {
+            let knownLegacyGroupIds = Set(restoredGroups.map(\.id))
+            for (index, workspace) in newTabs.enumerated() {
+                let workspaceSnapshot = workspaceSnapshots.indices.contains(index)
+                    ? workspaceSnapshots[index]
+                    : workspace.sessionSnapshot(includeScrollback: false)
+                let groupId = workspaceSnapshot.groupId.flatMap { knownLegacyGroupIds.contains($0) ? $0 : nil }
+                    ?? ensureFallbackGroup()
+                let containerId = UUID()
+                workspace.workspaceContainerId = containerId
+                restoredContainers.append(
+                    WorkspaceContainer(
+                        id: containerId,
+                        groupId: groupId,
+                        name: containerName(workspace, workspaceSnapshot),
+                        kind: workspaceSnapshot.remote == nil
+                            ? (workspaceSnapshot.currentDirectory.isEmpty ? .localSession : .localDirectory)
+                            : .remoteSession,
+                        rootPath: workspaceSnapshot.currentDirectory.isEmpty ? nil : workspaceSnapshot.currentDirectory,
+                        repositoryCommonDirectory: nil,
+                        remoteHost: workspaceSnapshot.remote?.destination,
+                        isCollapsed: false,
+                        lastActiveWorkspaceId: workspace.id
+                    )
+                )
+            }
+        }
+
+        // Snapshots written before explicit Git containers only knew that a root
+        // was a local directory. Upgrade conservatively when the bound root itself
+        // carries Git metadata; nested shell working directories remain ordinary
+        // local roots instead of being silently rebound to a repository ancestor.
+        for index in restoredContainers.indices
+        where restoredContainers[index].kind == .localDirectory {
+            guard let rootPath = restoredContainers[index].rootPath else { continue }
+            let gitMetadataPath = URL(fileURLWithPath: rootPath, isDirectory: true)
+                .appendingPathComponent(".git", isDirectory: false)
+                .path
+            if FileManager.default.fileExists(atPath: gitMetadataPath) {
+                restoredContainers[index].kind = .git
+            }
+        }
+
+        for index in restoredContainers.indices {
+            guard restoredContainers[index].kind == .git || restoredContainers[index].kind == .localDirectory,
+                  let rootPath = restoredContainers[index].rootPath else {
+                restoredContainers[index].isRootBroken = false
+                continue
+            }
+            var isDirectory: ObjCBool = false
+            restoredContainers[index].isRootBroken = !FileManager.default.fileExists(
+                atPath: rootPath,
+                isDirectory: &isDirectory
+            ) || !isDirectory.boolValue
+        }
+
+        let containerById = Dictionary(uniqueKeysWithValues: restoredContainers.map { ($0.id, $0) })
+        for workspace in newTabs where workspace.boundRootPath == nil {
+            let container = workspace.workspaceContainerId.flatMap { containerById[$0] }
+            let currentDirectory = workspace.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            workspace.boundRootPath = currentDirectory.isEmpty ? container?.rootPath : currentDirectory
+        }
+        for container in restoredContainers where container.kind == .git {
+            let leaves = newTabs.filter { $0.workspaceContainerId == container.id }
+            if !leaves.contains(where: { $0.workspaceLeafRole == .main }),
+               let mainLeaf = leaves.first(where: { $0.boundRootPath == container.rootPath })
+                ?? leaves.first(where: { !$0.isManagedWorktree })
+                ?? leaves.first {
+                mainLeaf.workspaceLeafRole = .main
+            }
+            for leaf in leaves {
+                if leaf.workspaceLeafRole == .compatibility {
+                    leaf.workspaceLeafRole = .external
+                }
+                leaf.isManagedWorktree = leaf.workspaceLeafRole == .managed
+                if leaf.workspaceLeafHead == nil,
+                   let branch = leaf.managedWorktreeBranch,
+                   !branch.isEmpty {
+                    leaf.workspaceLeafHead = .branch(branch)
+                }
+                if let root = leaf.boundRootPath {
+                    var isDirectory: ObjCBool = false
+                    leaf.isWorktreeBindingBroken = !FileManager.default.fileExists(
+                        atPath: root,
+                        isDirectory: &isDirectory
+                    ) || !isDirectory.boolValue
+                }
+            }
+        }
+        for index in restoredGroups.indices where restoredGroups[index].lastActiveWorkspaceId == nil {
+            let groupId = restoredGroups[index].id
+            restoredGroups[index].lastActiveWorkspaceId = newSelectedId.flatMap { selectedId in
+                guard let workspace = newTabs.first(where: { $0.id == selectedId }),
+                      let containerId = workspace.workspaceContainerId,
+                      containerById[containerId]?.groupId == groupId else { return nil }
+                return selectedId
+            } ?? newTabs.first(where: { workspace in
+                workspace.workspaceContainerId.flatMap { containerById[$0]?.groupId } == groupId
+            })?.id
+        }
+
+        // Publish the restored hierarchy in one main-actor turn before selection.
+        tabs = newTabs
         workspaceGroups = restoredGroups
+        workspaceContainers = restoredContainers
         selectedTabId = newSelectedId
         let existingIds = Set(newTabs.map(\.id))
         pruneBackgroundWorkspaceLoads(existingIds: existingIds)
@@ -6178,8 +6763,8 @@ extension TabManager {
 extension TabManager: WorkspacesHosting {}
 extension TabManager: WorkspaceGroupHosting {}
 
-// Workspace satisfies the CmuxWorkspaces tab seam with its existing
-// id/groupId/isPinned storage.
+// Workspace satisfies the CmuxWorkspaces leaf seam with its existing
+// id/workspaceContainerId/isPinned storage.
 extension Workspace: WorkspaceTabRepresenting {}
 
 extension Notification.Name {

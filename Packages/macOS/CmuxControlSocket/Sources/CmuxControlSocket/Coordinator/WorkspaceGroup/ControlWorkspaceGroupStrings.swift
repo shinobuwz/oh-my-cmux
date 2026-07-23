@@ -21,6 +21,8 @@ public struct ControlWorkspaceGroupStrings: Sendable, Equatable {
     /// `workspaceGroup.error.closeWorkspacesMustBeBoolean` — explicit
     /// destructive intent must be a JSON boolean.
     public let closeWorkspacesMustBeBoolean: String
+    /// `workspaceGroup.error.nonEmptyDelete` — non-empty groups must be emptied first.
+    public let nonEmptyGroupCannotBeDeleted: String
 
     /// Creates the localized message bundle.
     ///
@@ -34,11 +36,13 @@ public struct ControlWorkspaceGroupStrings: Sendable, Equatable {
         allChildrenAreAnchors: String,
         workspaceIsOtherGroupAnchor: String,
         invalidReferenceWorkspace: String,
-        closeWorkspacesMustBeBoolean: String
+        closeWorkspacesMustBeBoolean: String,
+        nonEmptyGroupCannotBeDeleted: String
     ) {
         self.allChildrenAreAnchors = allChildrenAreAnchors
         self.workspaceIsOtherGroupAnchor = workspaceIsOtherGroupAnchor
         self.invalidReferenceWorkspace = invalidReferenceWorkspace
         self.closeWorkspacesMustBeBoolean = closeWorkspacesMustBeBoolean
+        self.nonEmptyGroupCannotBeDeleted = nonEmptyGroupCannotBeDeleted
     }
 }

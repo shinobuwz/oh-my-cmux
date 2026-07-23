@@ -229,6 +229,10 @@ and pinned in `scripts/ghosttykit-checksums.txt`.
   `ssh`.
 - `GHOSTTY_BIN_DIR` remains the directory contract for the independent `path`
   shell-integration feature; it is no longer used to reconstruct a CLI filename.
+- After replacing `GHOSTTY_BIN` in Zig's owned `EnvMap`, `Exec.zig` refetches
+  the stored value before deriving `GHOSTTY_BIN_DIR`. The incoming slice can
+  point at the replaced map entry, so retaining it would read freed bytes and
+  export a corrupt, non-UTF-8 environment value.
 - Conflict note: future upstream merges must preserve the distinction between
   the exact CLI path (`GHOSTTY_BIN`) and its PATH directory
   (`GHOSTTY_BIN_DIR`) across `src/termio/Exec.zig` and every shell integration.

@@ -5,7 +5,7 @@ import Testing
 @MainActor
 private final class StubTab: WorkspaceTabRepresenting {
     let id: UUID
-    var groupId: UUID?
+    var workspaceContainerId: UUID?
     var isPinned: Bool
     var currentDirectory: String
 
@@ -16,7 +16,7 @@ private final class StubTab: WorkspaceTabRepresenting {
         currentDirectory: String = "/tmp"
     ) {
         self.id = id
-        self.groupId = groupId
+        self.workspaceContainerId = groupId
         self.isPinned = isPinned
         self.currentDirectory = currentDirectory
     }

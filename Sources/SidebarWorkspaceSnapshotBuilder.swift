@@ -56,6 +56,7 @@ struct SidebarWorkspaceSnapshotBuilder {
         let pullRequestRows: [PullRequestDisplay]
         let listeningPorts: [Int]
         let finderDirectoryPath: String?
+        let isWorktreeBindingBroken: Bool
         let mediaActivity: BrowserMediaActivity
         // Workspace todo status/checklist; taskStatus is nil when the
         // workspace opted out of status display or the remote todo-controls

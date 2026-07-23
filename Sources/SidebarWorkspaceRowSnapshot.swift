@@ -8,10 +8,11 @@ import Foundation
 /// rows then re-render only when their own value changed.
 struct SidebarWorkspaceRowSnapshot: Equatable {
     let workspaceId: UUID
-    let groupId: UUID?
+    let containerId: UUID?
     let index: Int
     let workspaceCount: Int
     let workspace: SidebarWorkspaceSnapshotBuilder.Snapshot
+    let isWorktreeBindingBroken: Bool
     let isActive: Bool
     let isMultiSelected: Bool
     let hasUserCustomTitle: Bool

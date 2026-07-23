@@ -121,6 +121,10 @@ public enum ControlCommandExecutionPolicy: Sendable, Equatable {
         // env dictionary behind a `v2MainSync` hop, so it runs on the worker
         // lane like the other workspace reads below.
         "workspace.env",
+        // Git worktree creation awaits subprocess-backed repository operations.
+        // Keep the synchronous socket reply on the worker while a bounded
+        // callback bridge performs the model mutation on the main actor.
+        "workspace.new_worktree",
         "workspace.remote.pty_sessions",
         "workspace.remote.pty_close",
         "workspace.remote.pty_detach",

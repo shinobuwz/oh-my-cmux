@@ -38,16 +38,19 @@ public struct SidebarWorkspaceSelectionSyncPolicy {
         return liveWorkspaceIds.firstIndex { selectedWorkspaceIds.contains($0) }
     }
 
-    /// Workspace id at an existing anchor index, if the index is still valid.
-    public func anchorWorkspaceId(
-        existingAnchorIndex: Int?,
+    /// Workspace id at an existing focus index, if the index is still valid.
+    ///
+    /// The index is the sidebar's last selection position (a focus/selection
+    /// anchor preserved across reorders), not a structural hierarchy identity.
+    public func focusWorkspaceId(
+        existingFocusIndex: Int?,
         liveWorkspaceIds: [UUID]
     ) -> UUID? {
-        guard let existingAnchorIndex,
-              liveWorkspaceIds.indices.contains(existingAnchorIndex) else {
+        guard let existingFocusIndex,
+              liveWorkspaceIds.indices.contains(existingFocusIndex) else {
             return nil
         }
-        return liveWorkspaceIds[existingAnchorIndex]
+        return liveWorkspaceIds[existingFocusIndex]
     }
 
     /// Anchor index to use for a shift-click range, deriving one from the
@@ -82,17 +85,20 @@ public struct SidebarWorkspaceSelectionSyncPolicy {
         isShiftClick ? (resolvedShiftAnchorIndex ?? clickedIndex) : clickedIndex
     }
 
-    /// Anchor index to preserve after the workspace list is reordered.
-    public func anchorIndexAfterWorkspaceReorder(
-        preferredAnchorWorkspaceId: UUID?,
+    /// Focus index to preserve after the workspace list is reordered.
+    ///
+    /// `preferredFocusedWorkspaceId` is the selection focal point kept stable
+    /// across the reorder — a selection concern, not a structural hierarchy id.
+    public func focusIndexAfterWorkspaceReorder(
+        preferredFocusedWorkspaceId: UUID?,
         selectedWorkspaceIds: Set<UUID>,
         focusedWorkspaceId: UUID?,
         liveWorkspaceIds: [UUID]
     ) -> Int? {
-        if let preferredAnchorWorkspaceId,
-           selectedWorkspaceIds.contains(preferredAnchorWorkspaceId),
-           let anchorIndex = liveWorkspaceIds.firstIndex(of: preferredAnchorWorkspaceId) {
-            return anchorIndex
+        if let preferredFocusedWorkspaceId,
+           selectedWorkspaceIds.contains(preferredFocusedWorkspaceId),
+           let focusIndex = liveWorkspaceIds.firstIndex(of: preferredFocusedWorkspaceId) {
+            return focusIndex
         }
         return anchorIndex(
             preferredWorkspaceId: focusedWorkspaceId,

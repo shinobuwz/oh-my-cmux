@@ -21,21 +21,21 @@ enum WorkspaceActionDispatcher {
 
     struct Target: Equatable {
         let workspaceIds: [UUID]
-        let anchorWorkspaceId: UUID?
+        let focusWorkspaceId: UUID?
 
-        init(workspaceIds: [UUID], anchorWorkspaceId: UUID?) {
+        init(workspaceIds: [UUID], focusWorkspaceId: UUID?) {
             self.workspaceIds = workspaceIds
-            self.anchorWorkspaceId = anchorWorkspaceId
+            self.focusWorkspaceId = focusWorkspaceId
         }
 
         static func single(_ workspaceId: UUID) -> Target {
-            Target(workspaceIds: [workspaceId], anchorWorkspaceId: workspaceId)
+            Target(workspaceIds: [workspaceId], focusWorkspaceId: workspaceId)
         }
     }
 
     struct PinState: Equatable {
         let targetWorkspaceIds: [UUID]
-        let anchorWorkspaceId: UUID
+        let focusWorkspaceId: UUID
         let pinned: Bool
     }
 
@@ -61,18 +61,16 @@ enum WorkspaceActionDispatcher {
         let targetWorkspaceIds = liveWorkspaceIds(in: context, from: target.workspaceIds)
         guard !targetWorkspaceIds.isEmpty else { return nil }
 
-        let anchorWorkspaceId = target.anchorWorkspaceId.flatMap { anchorId in
-            context.workspacesById[anchorId] == nil ? nil : anchorId
+        let focusWorkspaceId = target.focusWorkspaceId.flatMap { focusId in
+            context.workspacesById[focusId] == nil ? nil : focusId
         } ?? targetWorkspaceIds[0]
-
-        guard let anchorWorkspace = context.workspacesById[anchorWorkspaceId] else {
+        guard let focusWorkspace = context.workspacesById[focusWorkspaceId] else {
             return nil
         }
-
         return PinState(
             targetWorkspaceIds: targetWorkspaceIds,
-            anchorWorkspaceId: anchorWorkspaceId,
-            pinned: !anchorWorkspace.isPinned
+            focusWorkspaceId: focusWorkspaceId,
+            pinned: !focusWorkspace.isPinned
         )
     }
 

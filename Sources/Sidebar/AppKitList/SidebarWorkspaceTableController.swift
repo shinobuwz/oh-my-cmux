@@ -346,20 +346,19 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
                 }
             }
         } else if let headerActions = rows[row].appKitGroupHeaderActions {
-            // Group headers focus their anchor workspace: same fast path as
-            // workspace rows (burst coalescing; the completed click paints
-            // the optimistic anchor-active treatment).
             let modifiers = NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
             previewSelection(row: row, modifiers: modifiers, hitView: nil)
             if modifiers.contains(.command) || modifiers.contains(.shift) {
                 selectionCoalescer.flushNow()
-                headerActions.onFocusAnchor()
+                headerActions.onSelect()
             } else {
                 selectionCoalescer.request {
-                    headerActions.onFocusAnchor()
+                    headerActions.onSelect()
                 }
             }
-        }
+        } else if let containerActions = rows[row].appKitContainerHeaderActions {
+            containerActions.onSelect()
+         }
     }
 
     @objc private func didDoubleClickTableRow() {
@@ -414,6 +413,14 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
             configure(headerCell: cell, at: row)
             return cell
         }
+        if rows[row].appKitContainerHeaderModel != nil {
+            let cell = tableView.makeView(
+                withIdentifier: SidebarContainerHeaderTableCellView.reuseIdentifier,
+                owner: self
+            ) as? SidebarContainerHeaderTableCellView ?? SidebarContainerHeaderTableCellView()
+            configure(containerCell: cell, at: row)
+            return cell
+        }
         if rows[row].appKitWorkspaceRowModel != nil {
             let cell = tableView.makeView(
                 withIdentifier: SidebarWorkspaceRowTableCellView.reuseIdentifier,
@@ -435,11 +442,9 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
     }
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
-        // Group headers carry their anchor's workspaceId; a header drag would
-        // masquerade as dragging the anchor workspace and tear it out of the
-        // group. Headers are not row-draggable in the SwiftUI sidebar either.
-        guard rows.indices.contains(row), !rows[row].isGroupHeader, let actions else { return nil }
-        let workspaceId = rows[row].workspaceId
+        guard rows.indices.contains(row), !rows[row].isGroupHeader, !rows[row].isContainerHeader,
+              let workspaceId = rows[row].workspaceId,
+              let actions else { return nil }
         actions.beginWorkspaceDrag(workspaceId)
         workspaceDragSessionDidBegin()
         let item = NSPasteboardItem()
@@ -493,12 +498,15 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
             as? SidebarWorkspaceRowTableCellView
         let headerCell = table.view(atColumn: 0, row: row, makeIfNecessary: false)
             as? SidebarGroupHeaderTableCellView
+        let containerCell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarContainerHeaderTableCellView
         if rows[row].appKitWorkspaceRowModel != nil {
             guard let workspaceCell else { return }
             if let hitView, workspaceCell.selectionPreviewShouldIgnore(hitView) { return }
         } else if rows[row].appKitGroupHeaderModel != nil {
             guard let headerCell else { return }
             if let hitView, headerCell.selectionPreviewShouldIgnore(hitView) { return }
+        } else if rows[row].appKitContainerHeaderModel != nil {
+            guard containerCell != nil else { return }
         } else {
             return
         }
@@ -588,10 +596,9 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
     }
 
     func middleClick(row: Int) {
-        // Group headers carry their anchor's workspaceId; middle-closing the
-        // anchor from a header press would be destructive and non-parity.
-        guard rows.indices.contains(row), !rows[row].isGroupHeader else { return }
-        actions?.closeWorkspace(rows[row].workspaceId)
+        guard rows.indices.contains(row), !rows[row].isGroupHeader, !rows[row].isContainerHeader,
+              let workspaceId = rows[row].workspaceId else { return }
+        actions?.closeWorkspace(workspaceId)
     }
 
     func doubleClickEmptyArea() {
@@ -818,6 +825,8 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
                 cell.enforcePointerHovering(hovering)
             case let cell as SidebarWorkspaceRowTableCellView:
                 cell.enforcePointerHovering(hovering)
+            case let cell as SidebarContainerHeaderTableCellView:
+                cell.enforcePointerHovering(hovering)
             default:
                 break
             }
@@ -830,6 +839,8 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
             switch table.view(atColumn: 0, row: row, makeIfNecessary: false) {
             case let cell as SidebarGroupHeaderTableCellView:
                 configure(headerCell: cell, at: row)
+            case let cell as SidebarContainerHeaderTableCellView:
+                configure(containerCell: cell, at: row)
             case let cell as SidebarWorkspaceRowTableCellView:
                 configure(workspaceCell: cell, at: row)
             case let cell as SidebarWorkspaceTableCellView:
@@ -895,13 +906,16 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
             model: model,
             actions: actions,
             isPointerHovering: hoveredRowId == rowId && contextMenuRowId != rowId,
-            contextMenuDidOpen: { [weak self] in
-                self?.contextMenuDidOpen(rowId: rowId)
-            },
-            contextMenuDidClose: { [weak self] in
-                self?.contextMenuDidClose(rowId: rowId)
-            }
+            contextMenuDidOpen: { [weak self] in self?.contextMenuDidOpen(rowId: rowId) },
+            contextMenuDidClose: { [weak self] in self?.contextMenuDidClose(rowId: rowId) }
         )
+    }
+
+    private func configure(containerCell cell: SidebarContainerHeaderTableCellView, at row: Int) {
+        let configuration = rows[row]
+        guard let model = configuration.appKitContainerHeaderModel,
+              let actions = configuration.appKitContainerHeaderActions else { return }
+        cell.configure(model: model, actions: actions, isPointerHovering: hoveredRowId == configuration.id && contextMenuRowId != configuration.id)
     }
 
     private func configure(cell: SidebarWorkspaceTableCellView, at row: Int) {
@@ -913,12 +927,8 @@ final class SidebarWorkspaceTableController: NSObject, NSTableViewDataSource, NS
         cell.configure(
             row: configuration,
             isPointerHovering: hoveredRowId == rowId && contextMenuRowId != rowId,
-            contextMenuDidOpen: { [weak self] in
-                self?.contextMenuDidOpen(rowId: rowId)
-            },
-            contextMenuDidClose: { [weak self] in
-                self?.contextMenuDidClose(rowId: rowId)
-            }
+            contextMenuDidOpen: { [weak self] in self?.contextMenuDidOpen(rowId: rowId) },
+            contextMenuDidClose: { [weak self] in self?.contextMenuDidClose(rowId: rowId) }
         )
     }
 

@@ -139,7 +139,12 @@ extension TerminalController {
             let validation = v2MainSync {
                 let groupExists = preparation.tabManager.workspaceGroups.contains { $0.id == groupID }
                 let referenceIsMember = groupReferenceWorkspaceID.map { referenceID in
-                    preparation.tabManager.tabs.contains { $0.id == referenceID && $0.groupId == groupID }
+                    guard let containerID = preparation.tabManager.tabs.first(where: { $0.id == referenceID })?.workspaceContainerId else {
+                        return false
+                    }
+                    return preparation.tabManager.workspaceContainers.contains {
+                        $0.id == containerID && $0.groupId == groupID
+                    }
                 } ?? true
                 return (groupExists, referenceIsMember)
             }

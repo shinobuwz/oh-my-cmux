@@ -71,10 +71,10 @@ extension TerminalController {
             }
 
             if moveGroup {
-                guard tabManager.workspaceGroups.contains(where: { $0.anchorWorkspaceId == workspaceID }) else {
+                guard let sourceGroup = tabManager.workspaceGroup(for: workspaceID) else {
                     mutationError = .err(
                         code: "invalid_request",
-                        message: "Workspace is not a group anchor",
+                        message: String(localized: "mobile.workspaceMove.error.notGrouped", defaultValue: "Workspace is not inside a group"),
                         data: ["workspace_id": workspaceID.uuidString]
                     )
                     return
@@ -87,45 +87,36 @@ extension TerminalController {
                     )
                     return
                 }
-                let topLevelIds = tabManager.sidebarReorderWorkspaceIds(
-                    forDraggedWorkspaceId: workspaceID,
-                    targetWorkspaceId: beforeWorkspaceID,
-                    usesTopLevelRows: true
-                )
-                let targetTopLevelIndex = mobileWorkspaceMoveTopLevelTargetIndex(
-                    workspaceID: workspaceID,
-                    beforeWorkspaceID,
-                    targetIndex: targetIndex,
-                    topLevelIds: topLevelIds,
-                    tabManager: tabManager
-                )
-                _ = tabManager.reorderSidebarWorkspace(
-                    tabId: workspaceID,
-                    toIndex: targetTopLevelIndex,
-                    isDragOperation: true,
-                    usesTopLevelRows: true
-                )
+                let destinationIndex: Int
+                if let targetIndex {
+                    destinationIndex = targetIndex
+                } else if let beforeWorkspaceID,
+                          let beforeGroupID = tabManager.workspaceGroup(for: beforeWorkspaceID)?.id,
+                          let beforeIndex = tabManager.workspaceGroups.firstIndex(where: { $0.id == beforeGroupID }) {
+                    destinationIndex = beforeIndex
+                } else {
+                    destinationIndex = tabManager.workspaceGroups.count - 1
+                }
+                tabManager.moveWorkspaceGroup(groupId: sourceGroup.id, toIndex: destinationIndex)
                 return
             }
 
-            if workspace.groupId != targetGroupID {
-                if let targetGroupID {
-                    tabManager.addWorkspaceToGroup(
-                        workspaceId: workspaceID,
-                        groupId: targetGroupID,
-                        placement: .end
+            let currentGroupID = tabManager.workspaceGroup(for: workspaceID)?.id
+            if let targetGroupID, currentGroupID != targetGroupID {
+                guard let containerID = workspace.workspaceContainerId else {
+                    mutationError = .err(
+                        code: "invalid_request",
+                        message: String(localized: "mobile.workspaceMove.error.containerNotFound", defaultValue: "Workspace container not found"),
+                        data: ["workspace_id": workspaceID.uuidString]
                     )
-                    guard tabManager.tabs.first(where: { $0.id == workspaceID })?.groupId == targetGroupID else {
-                        mutationError = .err(
-                            code: "invalid_request",
-                            message: controlWorkspaceGroupStrings().workspaceIsOtherGroupAnchor,
-                            data: ["workspace_id": workspaceID.uuidString]
-                        )
-                        return
-                    }
-                } else {
-                    tabManager.removeWorkspaceFromGroup(workspaceId: workspaceID)
+                    return
                 }
+                let targetContainerIndex = tabManager.workspaceContainers.filter { $0.groupId == targetGroupID }.count
+                tabManager.moveWorkspaceContainer(
+                    containerId: containerID,
+                    toGroup: targetGroupID,
+                    toIndex: targetContainerIndex
+                )
             }
 
             if let beforeWorkspaceID {
@@ -133,8 +124,11 @@ extension TerminalController {
             } else if let targetIndex {
                 _ = tabManager.reorderWorkspace(tabId: workspaceID, toIndex: targetIndex)
             } else if let targetGroupID {
+                let targetContainerIDs = Set(
+                    tabManager.workspaceContainers.filter { $0.groupId == targetGroupID }.map(\.id)
+                )
                 let lastMemberIndex = tabManager.tabs.lastIndex {
-                    $0.id != workspaceID && $0.groupId == targetGroupID
+                    $0.id != workspaceID && $0.workspaceContainerId.map(targetContainerIDs.contains) == true
                 }
                 if let lastMemberIndex {
                     _ = tabManager.reorderWorkspace(
@@ -210,10 +204,9 @@ extension TerminalController {
               let beforeWorkspace = tabManager.tabs.first(where: { $0.id == beforeWorkspaceID }) else {
             return beforeWorkspaceID
         }
-        guard let groupID = beforeWorkspace.groupId,
-              let group = tabManager.workspaceGroups.first(where: { $0.id == groupID }) else {
+        guard let group = tabManager.workspaceGroup(for: beforeWorkspace.id) else {
             return beforeWorkspaceID
         }
-        return group.anchorWorkspaceId
+        return group.lastActiveWorkspaceId ?? beforeWorkspaceID
     }
 }

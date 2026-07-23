@@ -66,6 +66,7 @@ extension SidebarWorkspaceSnapshotBuilder.Snapshot {
             pullRequestRows: pullRequestRows,
             listeningPorts: listeningPorts,
             finderDirectoryPath: snapshot.finderDirectoryPath,
+            isWorktreeBindingBroken: snapshot.isWorktreeBindingBroken,
             // Media activity drives a leading row glyph, so stale values are
             // visually worse than ordinary telemetry text while the menu is open.
             mediaActivity: snapshot.mediaActivity,

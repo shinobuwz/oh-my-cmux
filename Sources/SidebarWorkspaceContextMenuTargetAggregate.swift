@@ -23,7 +23,6 @@ struct SidebarWorkspaceContextMenuTargetAggregate: Equatable {
     init(
         targetWorkspaceIds: [UUID],
         workspaceRowsById: [UUID: SidebarWorkspaceRowInput],
-        anchorWorkspaceIds: Set<UUID>,
         notificationIndex: SidebarWorkspaceNotificationIndex
     ) {
         self.targetWorkspaceIds = targetWorkspaceIds
@@ -39,9 +38,7 @@ struct SidebarWorkspaceContextMenuTargetAggregate: Equatable {
             && remoteTargetWorkspaceIds.allSatisfy {
                 workspaceRowsById[$0]?.remoteConnectionState == .disconnected
             }
-        eligibleGroupTargetIds = targetWorkspaceIds.filter {
-            !anchorWorkspaceIds.contains($0) && workspaceRowsById[$0] != nil
-        }
+        eligibleGroupTargetIds = targetWorkspaceIds.filter { workspaceRowsById[$0] != nil }
         let eligibleGroupIds = eligibleGroupTargetIds.map { workspaceRowsById[$0]?.groupId }
         allEligibleTargetsGroupId = Self.commonGroupId(eligibleGroupIds)
         hasGroupedEligibleTarget = eligibleGroupTargetIds.contains {

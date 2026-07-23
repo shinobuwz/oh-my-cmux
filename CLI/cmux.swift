@@ -8213,7 +8213,7 @@ struct CMUXCLI {
         guard let sub = commandArgs.first?.lowercased() else {
             throw CLIError(message: String(
                 localized: "cli.error.workspaceSubcommandRequired",
-                defaultValue: "workspace requires a subcommand. Try: list, create, env, close, rename, select, status, reconnect, disconnect, loading, group"
+                defaultValue: "workspace requires a subcommand. Try: list, create, new-worktree, env, close, rename, select, status, reconnect, disconnect, loading, group"
             ))
         }
         let rest = Array(commandArgs.dropFirst())
@@ -8244,6 +8244,14 @@ struct CMUXCLI {
                 idFormat: idFormat,
                 windowOverride: windowOverride,
                 honorJSONOutput: true
+            )
+        case "new-worktree":
+            try runWorkspaceNewWorktreeCommand(
+                commandArgs: rest,
+                client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
+                windowOverride: windowOverride
             )
         case "env":
             try runWorkspaceEnvCommand(
@@ -8317,11 +8325,70 @@ struct CMUXCLI {
             throw CLIError(message: String(
                 format: String(
                     localized: "cli.error.workspaceSubcommandUnknown",
-                    defaultValue: "Unknown workspace subcommand: %@. Try: list, create, env, close, rename, select, status, reconnect, disconnect, loading, group"
+                    defaultValue: "Unknown workspace subcommand: %@. Try: list, create, new-worktree, env, close, rename, select, status, reconnect, disconnect, loading, group"
                 ),
                 locale: .current,
                 sub
             ))
+        }
+    }
+
+    private func runWorkspaceNewWorktreeCommand(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride: String?
+    ) throws {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (focusOpt, remaining) = parseOption(rem0, name: "--focus")
+        if let unknown = remaining.first(where: { $0.hasPrefix("--") }) {
+            throw CLIError(message: String(
+                format: String(
+                    localized: "cli.workspace.newWorktree.error.unknownFlag",
+                    defaultValue: "workspace new-worktree: unknown flag '%@'. Known flags: --workspace <id|ref|index>, --window <id|ref|index>, --focus <true|false>"
+                ),
+                locale: .current,
+                unknown
+            ))
+        }
+        let positional = remaining.filter { !$0.hasPrefix("--") }
+        guard positional.count == 1 else {
+            throw CLIError(message: String(
+                localized: "cli.workspace.newWorktree.usage",
+                defaultValue: "Usage: cmux workspace new-worktree <branch> [--workspace <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]"
+            ))
+        }
+
+        let windowHandle = try normalizeWindowHandle(windowOverride, client: client)
+        let workspaceID = try resolveWorkspaceId(workspaceOpt, client: client, windowHandle: windowHandle)
+        var params: [String: Any] = [
+            "branch": positional[0],
+            "workspace_id": workspaceID,
+        ]
+        if let windowHandle { params["window_id"] = windowHandle }
+        try applyFocusOption(focusOpt, defaultValue: false, to: &params)
+        let response = try client.sendV2(
+            method: "workspace.new_worktree",
+            params: params,
+            responseTimeout: 125
+        )
+        if jsonOutput {
+            print(jsonString(formatIDs(response, mode: idFormat)))
+            return
+        }
+        if let path = response["path"] as? String {
+            let successFormat = String(
+                localized: "cli.workspace.newWorktree.createdAtPath",
+                defaultValue: "Created worktree '%@' at %@"
+            )
+            print(String(format: successFormat, locale: .current, positional[0], path))
+        } else {
+            let successFormat = String(
+                localized: "cli.workspace.newWorktree.created",
+                defaultValue: "Created worktree '%@'"
+            )
+            print(String(format: successFormat, locale: .current, positional[0]))
         }
     }
 

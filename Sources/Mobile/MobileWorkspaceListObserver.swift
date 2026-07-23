@@ -240,12 +240,10 @@ final class MobileWorkspaceListObserver {
                 // a pure pin toggle need not change the panel set or title, so
                 // without this the phone never learns the workspace was pinned.
                 workspace.$isPinned.map { _ in () }.eraseToAnyPublisher(),
-                // Group membership is iOS-facing (the phone nests members under
-                // their group header). Moving a workspace into or out of a group
-                // mutates only this workspace's `groupId`; it need not change the
-                // tab set, `workspaceGroups`, the panel set, or the title, so
-                // without this the phone never learns the membership changed.
-                workspace.$groupId.map { _ in () }.eraseToAnyPublisher(),
+                // Container membership determines the iOS-facing group nesting.
+                // Moving a leaf between containers changes only this published
+                // identifier, so observe it explicitly.
+                workspace.$workspaceContainerId.map { _ in () }.eraseToAnyPublisher(),
                 workspace.$currentDirectory.map { _ in () }.eraseToAnyPublisher(),
                 workspace.$panelDirectories.map { _ in () }.eraseToAnyPublisher(),
                 // Todo status override + checklist are workspace-list-facing
@@ -324,25 +322,24 @@ final class MobileWorkspaceListObserver {
         hasher.combine(tabs.count)
         hasher.combine(selectedTabID)
         // Group sections are iOS-facing. Hash group order + the fields the phone
-        // renders (name, collapse, pin, anchor) so a pure collapse/expand, rename,
-        // or reorder re-emits to the phone. Membership is already covered by each
-        // workspace's `groupId`, hashed in the per-workspace loop below.
+        // renders (name, collapse, pin, last active descendant) so a pure
+        // collapse/expand, rename, or reorder re-emits to the phone. Container
+        // membership is covered by each workspace's container id below.
         hasher.combine(groups.count)
         for group in groups {
             hasher.combine(group.id)
             hasher.combine(group.name)
             hasher.combine(group.isCollapsed)
             hasher.combine(group.isPinned)
-            hasher.combine(group.anchorWorkspaceId)
+            hasher.combine(group.lastActiveWorkspaceId)
         }
         for workspace in tabs {
             hasher.combine(workspace.id)
             hasher.combine(workspace.title)
             hasher.combine(workspace.isPinned)
-            // Group membership is iOS-facing (the phone nests members under the
-            // group header), and a pure move-into/out-of-group need not change the
-            // panel set or title, so hash it here.
-            hasher.combine(workspace.groupId)
+            // Container membership is iOS-facing through the flattened group
+            // projection. Moving a leaf between containers changes this identity.
+            hasher.combine(workspace.workspaceContainerId)
             // Last-activity preview line + timestamp shown on each row. Sourced
             // from the notification store (not the TabManager graph), so it is
             // folded in here as a precomputed signature.

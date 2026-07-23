@@ -20,6 +20,7 @@ public enum ShortcutAction: String, CaseIterable, Sendable, Hashable, SettingCod
     // MARK: Workspace
     case toggleSidebar
     case newTab
+    case newWorktree
     case newBrowserWorkspace
     case saveLayoutTemplate
     case openFolder
@@ -179,7 +180,7 @@ extension ShortcutAction {
         case .openSettings, .reloadConfiguration, .showHideAllWindows, .globalSearch,
              .newWindow, .closeWindow, .toggleFullScreen, .quit:
             return .app
-        case .toggleSidebar, .newTab, .newBrowserWorkspace, .saveLayoutTemplate, .openFolder, .reopenPreviousSession, .goToWorkspace,
+        case .toggleSidebar, .newTab, .newWorktree, .newBrowserWorkspace, .saveLayoutTemplate, .openFolder, .reopenPreviousSession, .goToWorkspace,
              .commandPalette, .commandPaletteNext, .commandPalettePrevious, .sendFeedback,
              .showNotifications, .jumpToUnread, .toggleUnread, .markOldestUnreadAndJumpNext,
              .focusRightSidebar, .switchRightSidebarToFiles, .switchRightSidebarToFind,
@@ -336,6 +337,7 @@ extension ShortcutAction {
         case .quit: return "Quit cmux"
         case .toggleSidebar: return "Toggle Left Sidebar"
         case .newTab: return "New Workspace"
+        case .newWorktree: return String(localized: "shortcut.newWorktree.label", defaultValue: "New Worktree")
         case .newBrowserWorkspace:
             return String(localized: "shortcut.newBrowserWorkspace.label", defaultValue: "New Browser Workspace")
         case .saveLayoutTemplate:

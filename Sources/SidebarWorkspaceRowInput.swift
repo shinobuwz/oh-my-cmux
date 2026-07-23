@@ -11,10 +11,12 @@ import Foundation
 /// not O(full row subtrees).
 struct SidebarWorkspaceRowInput {
     let workspaceId: UUID
+    let containerId: UUID?
     let groupId: UUID?
     let index: Int
     let workspaceCount: Int
     let workspace: SidebarWorkspaceSnapshotBuilder.Snapshot
+    let isWorktreeBindingBroken: Bool
     let isActive: Bool
     let isMultiSelected: Bool
     let hasUserCustomTitle: Bool
@@ -50,10 +52,11 @@ struct SidebarWorkspaceRowInput {
         let targetAggregate = list.contextMenuTargetAggregate(for: self)
         return SidebarWorkspaceRowSnapshot(
             workspaceId: workspaceId,
-            groupId: groupId,
+            containerId: containerId,
             index: index,
             workspaceCount: workspaceCount,
             workspace: workspace,
+            isWorktreeBindingBroken: isWorktreeBindingBroken,
             isActive: isActive,
             isMultiSelected: isMultiSelected,
             hasUserCustomTitle: hasUserCustomTitle,

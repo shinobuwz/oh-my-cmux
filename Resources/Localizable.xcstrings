@@ -33027,13 +33027,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "workspace requires a subcommand. Try: list, create, env, close, rename, select, status, reconnect, disconnect, loading, group"
+            "value": "workspace requires a subcommand. Try: list, create, new-worktree, env, close, rename, select, status, reconnect, disconnect, loading, group"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "workspace にはサブコマンドが必要です。利用可能: list, create, env, close, rename, select, status, reconnect, disconnect, loading, group"
+            "value": "workspace にはサブコマンドが必要です。利用可能: list, create, new-worktree, env, close, rename, select, status, reconnect, disconnect, loading, group"
           }
         },
         "ko": {
@@ -33056,13 +33056,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Unknown workspace subcommand: %@. Try: list, create, env, close, rename, select, status, reconnect, disconnect, loading, group"
+            "value": "Unknown workspace subcommand: %@. Try: list, create, new-worktree, env, close, rename, select, status, reconnect, disconnect, loading, group"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "不明な workspace サブコマンド: %@。利用可能: list, create, env, close, rename, select, status, reconnect, disconnect, loading, group"
+            "value": "不明な workspace サブコマンド: %@。利用可能: list, create, new-worktree, env, close, rename, select, status, reconnect, disconnect, loading, group"
           }
         },
         "ko": {
@@ -47443,13 +47443,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Usage: cmux workspace <subcommand> [flags]\n\nCanonical noun for workspace operations. Legacy verbs\n(new-workspace, list-workspaces, close-workspace,\nrename-workspace, select-workspace) keep working and print a\none-time deprecation hint pointing here.\n\nSubcommands:\n  list                    List workspaces in a window\n  create [flags]          Create a workspace (same flags as new-workspace)\n  env [workspace] [--mask]\n                          Print a workspace's configured environment\n                          variables (--mask redacts the values)\n  close <workspace>       Close a workspace\n  rename <workspace> --title <new>\n  select <workspace>      Make a workspace active\n  status [set <lane|auto>]\n                          Show or pin the workspace todo status\n  reconnect [workspace]   Reconnect a remote (SSH) workspace, including one\n                          whose automatic reconnect paused because the host\n                          was unreachable\n  disconnect [workspace]  Stop a remote (SSH) workspace's connection\n  loading <on|off> [--id <name>] Toggle the workspace loading spinner.\n  group <subcommand>      Workspace group operations (see cmux workspace-group --help)\nenv/reconnect/disconnect accept a positional handle or --workspace\n<id|ref|index>, defaulting to the caller's workspace, then the\nselected one (of --window's window when given).\nExamples:\n  cmux workspace list --json\n  cmux workspace create --name Build --cwd ~/projects/myapp\n  cmux workspace env workspace:3 --mask\n  cmux workspace close workspace:3\n  cmux workspace reconnect\n  cmux workspace disconnect --workspace workspace:3"
+            "value": "Usage: cmux workspace <subcommand> [flags]\n\nCanonical noun for workspace operations. Legacy verbs\n(new-workspace, list-workspaces, close-workspace,\nrename-workspace, select-workspace) keep working and print a\none-time deprecation hint pointing here.\n\nSubcommands:\n  list                    List workspaces in a window\n  create [flags]          Create a workspace (same flags as new-workspace)\n  new-worktree <branch> [flags]\n                          Create a managed Git worktree in the selected workspace\n  env [workspace] [--mask]\n                          Print a workspace's configured environment\n                          variables (--mask redacts the values)\n  close <workspace>       Close a workspace\n  rename <workspace> --title <new>\n  select <workspace>      Make a workspace active\n  status [set <lane|auto>]\n                          Show or pin the workspace todo status\n  reconnect [workspace]   Reconnect a remote (SSH) workspace, including one\n                          whose automatic reconnect paused because the host\n                          was unreachable\n  disconnect [workspace]  Stop a remote (SSH) workspace's connection\n  loading <on|off> [--id <name>] Toggle the workspace loading spinner.\n  group <subcommand>      Workspace group operations (see cmux workspace-group --help)\nenv/reconnect/disconnect accept a positional handle or --workspace\n<id|ref|index>, defaulting to the caller's workspace, then the\nselected one (of --window's window when given).\nExamples:\n  cmux workspace list --json\n  cmux workspace create --name Build --cwd ~/projects/myapp\n  cmux workspace new-worktree feature/sidebar --focus true\n  cmux workspace env workspace:3 --mask\n  cmux workspace close workspace:3\n  cmux workspace reconnect\n  cmux workspace disconnect --workspace workspace:3"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "使い方: cmux workspace <サブコマンド> [フラグ]\n\nワークスペース操作の正規の名前空間です。従来の動詞コマンド\n(new-workspace、list-workspaces、close-workspace、\nrename-workspace、select-workspace) は引き続き動作し、ここを指す\n非推奨ヒントを一度だけ表示します。\n\nサブコマンド:\n  list                    ウィンドウ内のワークスペースを一覧表示\n  create [flags]          ワークスペースを作成 (new-workspace と同じフラグ。\n                          --env KEY=VALUE と --env-file <path> を含む)\n  env [workspace] [--mask]\n                          ワークスペースに設定された環境変数を表示\n                          (--mask は値を伏せ字にします)\n  close <workspace>       ワークスペースを閉じる\n  rename <workspace> --title <new>\n  select <workspace>      ワークスペースをアクティブにする\n  reconnect [workspace]   リモート (SSH) ワークスペースを再接続。ホストに\n                          到達できず自動再接続が一時停止したものも含む\n  disconnect [workspace]  リモート (SSH) ワークスペースの接続を停止\n  status [set <lane|auto>]\n                          ワークスペースの todo ステータスを表示/固定\n  loading <on|off> [--id <name>]\n                          ワークスペースの読み込みスピナーを切り替え。--id ごとに\n                          別のローダーとして積み重なり、省略時は既定の 1 つを\n                          切り替えます\n  group <subcommand>      ワークスペースグループ操作 (cmux workspace-group --help を参照)\n\nenv/reconnect/disconnect は位置引数のハンドルまたは --workspace\n<id|ref|index> を受け付け、省略時は呼び出し元のワークスペース、\n次に選択中のワークスペース (--window 指定時はそのウィンドウ) を\n対象にします。\n\n例:\n  cmux workspace list --json\n  cmux workspace create --name Build --cwd ~/projects/myapp\n  cmux workspace create --cwd . --env AWS_PROFILE=prod --env-file ./.cmux.env\n  cmux workspace env workspace:3 --mask\n  cmux workspace close workspace:3\n  cmux workspace reconnect\n  cmux workspace disconnect --workspace workspace:3\n  cmux workspace loading on\n  cmux workspace loading on --id build\n  cmux workspace loading off"
+            "value": "使用法: cmux workspace <subcommand> [flags]\n\nワークスペース操作の標準コマンドです。従来のコマンド\n(new-workspace, list-workspaces, close-workspace,\nrename-workspace, select-workspace) も引き続き動作し、このコマンドを案内する\n非推奨メッセージを一度表示します。\n\nサブコマンド:\n  list                    ウインドウ内のワークスペースを一覧表示\n  create [flags]          ワークスペースを作成（new-workspace と同じフラグ）\n  new-worktree <branch> [flags]\n                          選択中のワークスペースに管理対象 Git ワークツリーを作成\n  env [workspace] [--mask]\n                          ワークスペースの環境変数を表示\n                          （--mask で値を伏せ字にします）\n  close <workspace>       ワークスペースを閉じる\n  rename <workspace> --title <new>\n  select <workspace>      ワークスペースを選択\n  status [set <lane|auto>]\n                          ワークスペースの Todo 状態を表示または固定\n  reconnect [workspace]   リモート（SSH）ワークスペースへ再接続\n  disconnect [workspace]  リモート（SSH）ワークスペースの接続を停止\n  loading <on|off> [--id <name>] 読み込みスピナーを切り替え\n  group <subcommand>      ワークスペースグループ操作（cmux workspace-group --help を参照）\nenv/reconnect/disconnect は位置引数または --workspace <id|ref|index> を受け取り、\n省略時は呼び出し元のワークスペース、次に選択中のワークスペースを使用します。\n--window 指定時はそのウインドウが対象です。\n例:\n  cmux workspace list --json\n  cmux workspace create --name Build --cwd ~/projects/myapp\n  cmux workspace new-worktree feature/sidebar --focus true\n  cmux workspace env workspace:3 --mask\n  cmux workspace close workspace:3\n  cmux workspace reconnect\n  cmux workspace disconnect --workspace workspace:3"
           }
         },
         "ko": {
@@ -243181,6 +243181,1196 @@
           "stringUnit": {
             "state": "translated",
             "value": "すべてのワークツリーを更新"
+          }
+        }
+      }
+    },
+    "cli.workspace.newWorktree.created": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Created worktree '%@'"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリー「%@」を作成しました"
+          }
+        }
+      }
+    },
+    "cli.workspace.newWorktree.createdAtPath": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Created worktree '%@' at %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリー「%@」を %@ に作成しました"
+          }
+        }
+      }
+    },
+    "cli.workspace.newWorktree.error.unknownFlag": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "workspace new-worktree: unknown flag '%@'. Known flags: --workspace <id|ref|index>, --window <id|ref|index>, --focus <true|false>"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "workspace new-worktree: 不明なフラグ「%@」です。使用可能なフラグ: --workspace <id|ref|index>, --window <id|ref|index>, --focus <true|false>"
+          }
+        }
+      }
+    },
+    "cli.workspace.newWorktree.usage": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usage: cmux workspace new-worktree <branch> [--workspace <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用法: cmux workspace new-worktree <branch> [--workspace <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]"
+          }
+        }
+      }
+    },
+    "contextMenu.workspaceGroup.new": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Workspace Group"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいワークスペースグループ"
+          }
+        }
+      }
+    },
+    "menu.file.newWorktree": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Worktree…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいワークツリー…"
+          }
+        }
+      }
+    },
+    "shortcut.newWorktree.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいワークツリー"
+          }
+        }
+      }
+    },
+    "workspaceContainer.brokenRoot": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Broken Root"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "壊れたルート"
+          }
+        }
+      }
+    },
+    "workspaceContainer.chooseRoot.prompt": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add Workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを追加"
+          }
+        }
+      }
+    },
+    "workspaceContainer.chooseRoot.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose Workspace Root"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースルートを選択"
+          }
+        }
+      }
+    },
+    "workspaceContainer.collapse.a11y": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapse container"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを折りたたむ"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを削除"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを削除"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete.force.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Force Delete"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "強制削除"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete.force.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git refused a normal removal. Force removal may discard uncommitted changes; every branch and the main root will still be preserved."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git が通常の削除を拒否しました。強制削除すると未コミットの変更が失われる可能性がありますが、すべてのブランチとメインルートは保持されます。"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete.force.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Force delete remaining worktrees?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "残りのワークツリーを強制削除しますか？"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The workspace will be removed from cmux. Its main root and Git branches are preserved. cmux-managed linked worktree directories listed below will be deleted.\n\n%@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを cmux から削除します。メインルートと Git ブランチは保持されます。以下の cmux 管理ワークツリーディレクトリは削除されます。\n\n%@"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete.noManaged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No linked worktree directories will be deleted."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リンク済みワークツリーディレクトリは削除されません。"
+          }
+        }
+      }
+    },
+    "workspaceContainer.delete.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete workspace “%@”?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース「%@」を削除しますか？"
+          }
+        }
+      }
+    },
+    "workspaceContainer.duplicate.locate": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locate Existing"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "既存の項目を表示"
+          }
+        }
+      }
+    },
+    "workspaceContainer.duplicate.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This root already belongs to a workspace in this window."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このルートは、このウインドウ内のワークスペースにすでに追加されています。"
+          }
+        }
+      }
+    },
+    "workspaceContainer.duplicate.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace already added"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースは追加済みです"
+          }
+        }
+      }
+    },
+    "workspaceContainer.error.bareRepository": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bare Git repositories are not supported: %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ベア Git リポジトリはサポートされていません：%@"
+          }
+        }
+      }
+    },
+    "workspaceContainer.error.create": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux could not create the workspace."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux はワークスペースを作成できませんでした。"
+          }
+        }
+      }
+    },
+    "workspaceContainer.error.invalidDirectory": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The folder no longer exists: %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "フォルダが存在しません：%@"
+          }
+        }
+      }
+    },
+    "workspaceContainer.error.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t add workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを追加できませんでした"
+          }
+        }
+      }
+    },
+    "workspaceContainer.expand.a11y": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expand container"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを展開"
+          }
+        }
+      }
+    },
+    "workspaceContainer.localSession": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local Session"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルセッション"
+          }
+        }
+      }
+    },
+    "workspaceContainer.locateRoot": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locate Root"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ルートを探す"
+          }
+        }
+      }
+    },
+    "workspaceContainer.locateRoot.prompt": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locate Root"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ルートを探す"
+          }
+        }
+      }
+    },
+    "workspaceContainer.locateRoot.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locate Workspace Root"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースルートを探す"
+          }
+        }
+      }
+    },
+    "workspaceContainer.newWorktree.a11y": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいワークツリー"
+          }
+        }
+      }
+    },
+    "workspaceContainer.untitled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース"
+          }
+        }
+      }
+    },
+    "workspaceGroup.create.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Name the group, then choose its first workspace root."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "グループ名を入力してから、最初のワークスペースルートを選択してください。"
+          }
+        }
+      }
+    },
+    "workspaceGroup.create.namePlaceholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Group name"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "グループ名"
+          }
+        }
+      }
+    },
+    "workspaceGroup.create.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Workspace Group"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいワークスペースグループ"
+          }
+        }
+      }
+    },
+    "workspaceGroup.error.nonEmptyDelete": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A non-empty group cannot be deleted"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空でないグループは削除できません"
+          }
+        }
+      }
+    },
+    "workspaceGroup.gitRepositories": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git Repositories"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git リポジトリ"
+          }
+        }
+      }
+    },
+    "workspaceGroup.migrated.defaultName": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspaces"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース"
+          }
+        }
+      }
+    },
+    "workspaceLeaf.brokenWorktree": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Broken Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "壊れたワークツリー"
+          }
+        }
+      }
+    },
+    "workspaceLeaf.deleteWorktree": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを削除"
+          }
+        }
+      }
+    },
+    "workspaceLeaf.recreateWorktree": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recreate Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを再作成"
+          }
+        }
+      }
+    },
+    "workspaceLeaf.removeWorktree": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを cmux から削除"
+          }
+        }
+      }
+    },
+    "worktree.create.branchPlaceholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "feature/my-branch"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "feature/my-branch"
+          }
+        }
+      }
+    },
+    "worktree.create.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを作成"
+          }
+        }
+      }
+    },
+    "worktree.create.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a new branch name. cmux will create its worktree and open a terminal."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいブランチ名を入力してください。cmux がワークツリーを作成し、ターミナルを開きます。"
+          }
+        }
+      }
+    },
+    "worktree.create.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを作成"
+          }
+        }
+      }
+    },
+    "worktree.delete.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを削除"
+          }
+        }
+      }
+    },
+    "worktree.delete.force.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Force Delete"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "強制削除"
+          }
+        }
+      }
+    },
+    "worktree.delete.force.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git refused the normal removal. Force removal may discard uncommitted changes; the branch will still be preserved."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git が通常の削除を拒否しました。強制削除すると未コミットの変更が失われる可能性がありますが、ブランチは保持されます。"
+          }
+        }
+      }
+    },
+    "worktree.delete.force.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Force delete worktree?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを強制削除しますか？"
+          }
+        }
+      }
+    },
+    "worktree.delete.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The worktree directory will be removed. Its Git branch will be preserved."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーディレクトリを削除します。Git ブランチは保持されます。"
+          }
+        }
+      }
+    },
+    "worktree.delete.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete worktree?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを削除しますか？"
+          }
+        }
+      }
+    },
+    "worktree.error.crossWindow": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This worktree is open in another cmux window (%@). Locate it there before deleting."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このワークツリーは別の cmux ウインドウ（%@）で開かれています。削除する前にそのウインドウで確認してください。"
+          }
+        }
+      }
+    },
+    "worktree.error.git": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Git operation failed."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git 操作に失敗しました。"
+          }
+        }
+      }
+    },
+    "worktree.error.invalidBranch": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git rejected the branch name: %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Git がブランチ名を拒否しました：%@"
+          }
+        }
+      }
+    },
+    "worktree.error.main": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The main worktree is fixed. Remove the workspace root instead."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メインワークツリーは固定されています。代わりにワークスペースルートを削除してください。"
+          }
+        }
+      }
+    },
+    "worktree.error.missingBranch": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux no longer knows which branch should recreate this worktree."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux は、このワークツリーを再作成するブランチを特定できません。"
+          }
+        }
+      }
+    },
+    "worktree.error.missingContainer": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The workspace is no longer available."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースは利用できなくなりました。"
+          }
+        }
+      }
+    },
+    "worktree.error.notGit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This workspace root is not an available Git repository."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このワークスペースルートは利用可能な Git リポジトリではありません。"
+          }
+        }
+      }
+    },
+    "worktree.error.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Worktree operation failed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリー操作に失敗しました"
+          }
+        }
+      }
+    },
+    "worktree.error.unborn": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create the repository’s first commit before adding a worktree."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを追加する前に、リポジトリの最初のコミットを作成してください。"
+          }
+        }
+      }
+    },
+    "worktree.error.unmanaged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This worktree is not managed by cmux."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このワークツリーは cmux によって管理されていません。"
+          }
+        }
+      }
+    },
+    "worktree.remove.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove from cmux"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux から削除"
+          }
+        }
+      }
+    },
+    "worktree.remove.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The linked worktree will remain on disk and only this sidebar leaf will be removed."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リンク済みワークツリーはディスクに残り、このサイドバー項目のみ削除されます。"
+          }
+        }
+      }
+    },
+    "worktree.remove.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove worktree from cmux?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを cmux から削除しますか？"
+          }
+        }
+      }
+    },
+    "command.newWorktree.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Worktree"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新規ワークツリー"
+          }
+        }
+      }
+    },
+    "mobile.workspaceGroup.error.onlyEmptyRemove": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only an empty group can be removed on mobile"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "モバイルでは空のグループのみ削除できます"
+          }
+        }
+      }
+    },
+    "mobile.workspaceMove.error.containerNotFound": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace container not found"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースコンテナが見つかりません"
+          }
+        }
+      }
+    },
+    "mobile.workspaceMove.error.notGrouped": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace is not inside a group"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースはグループに属していません"
           }
         }
       }
