@@ -192,7 +192,7 @@ final class CMUXOpenCommandTests: XCTestCase {
         XCTAssertEqual(state.commands.compactMap { Self.v2Payload(from: $0)?["method"] as? String }, ["markdown.open"])
     }
 
-    func testDiffCommandGeneratesCodeViewAndOpensBrowserSplit() throws {
+    func testDiffCommandGeneratesCodeViewAndOpensInCurrentPane() throws {
         let cliPath = try bundledCLIPath()
         let socketPath = makeSocketPath("diff-open")
         let listenerFD = try bindUnixSocket(at: socketPath)
@@ -312,6 +312,7 @@ final class CMUXOpenCommandTests: XCTestCase {
 
             let params = payload["params"] as? [String: Any] ?? [:]
             guard method == "browser.open_split",
+                  params["placement"] as? String == "current_pane",
                   params["focus"] as? Bool == true,
                   let rawURL = params["url"] as? String,
                   let viewerURL = URL(string: rawURL),
