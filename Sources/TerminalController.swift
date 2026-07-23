@@ -6501,6 +6501,9 @@ class TerminalController {
             url = nil
         }
         let respectExternalOpenRules = v2Bool(params, "respect_external_open_rules") ?? false
+        let opensInCurrentPane = v2String(params, "placement")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "current_pane"
 
         if BrowserAvailabilitySettings.isDisabled() {
             if v2IsDiffViewerURL(url) {
@@ -6559,7 +6562,8 @@ class TerminalController {
                 return
             }
 
-            let sourcePaneUUID = ws.paneId(forPanelId: sourceSurfaceId)?.id
+            let sourcePaneId = ws.paneId(forPanelId: sourceSurfaceId)
+            let sourcePaneUUID = sourcePaneId?.id
             let focus = v2FocusAllowed(requested: v2Bool(params, "focus") ?? false)
             let omnibarVisible = v2Bool(params, "show_omnibar") ?? true
             let transparentBackground = v2Bool(params, "transparent_background") ?? false
@@ -6568,7 +6572,24 @@ class TerminalController {
             var createdSplit = true
             var placementStrategy = "split_right"
             let createdPanel: BrowserPanel?
-            if let targetPane = ws.preferredRightSideTargetPane(fromPanelId: sourceSurfaceId) {
+            if opensInCurrentPane {
+                guard let sourcePaneId else {
+                    result = .err(code: "not_found", message: "Source pane not found", data: ["surface_id": sourceSurfaceId.uuidString])
+                    return
+                }
+                createdPanel = ws.newBrowserSurface(
+                    inPane: sourcePaneId,
+                    url: url,
+                    focus: focus,
+                    selectWhenNotFocused: true,
+                    creationPolicy: .automationPreload,
+                    omnibarVisible: omnibarVisible,
+                    transparentBackground: transparentBackground,
+                    bypassRemoteProxy: bypassRemoteProxy
+                )
+                createdSplit = false
+                placementStrategy = "current_pane"
+            } else if let targetPane = ws.preferredRightSideTargetPane(fromPanelId: sourceSurfaceId) {
                 createdPanel = ws.newBrowserSurface(
                     inPane: targetPane,
                     url: url,

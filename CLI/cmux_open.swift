@@ -1072,6 +1072,7 @@ extension CMUXCLI {
         var params: [String: Any] = [
             "url": viewer.url.absoluteString,
             "focus": focus,
+            "placement": "current_pane",
             "show_omnibar": false,
             "transparent_background": true,
             "bypass_remote_proxy": true

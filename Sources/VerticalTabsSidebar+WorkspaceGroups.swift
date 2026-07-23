@@ -59,8 +59,13 @@ extension VerticalTabsSidebar {
                 )
             },
             onRunResolvedItem: { _ in },
-            onRename: { [weak tabManager, groupId = group.id, name = group.name] in
-                tabManager?.renameWorkspaceGroup(groupId: groupId, name: name)
+            onRename: { [weak tabManager, groupId = group.id, currentName = group.name] in
+                guard let tabManager else { return }
+                presentSidebarWorkspaceGroupRenamePrompt(
+                    tabManager: tabManager,
+                    groupId: groupId,
+                    currentName: currentName
+                )
             },
             onTogglePinned: { [weak tabManager, groupId = group.id] in
                 tabManager?.toggleWorkspaceGroupPinned(groupId: groupId)
