@@ -1,24 +1,26 @@
-# Ghostty Fork Changes (manaflow-ai/ghostty)
+# Ghostty Fork Changes (`shinobuwz/oh-my-cmux:ghostty-main`)
 
-This repo uses a fork of Ghostty for local patches that aren't upstream yet.
-When we change the fork, update this document and the parent submodule SHA.
+This personal project keeps cmux-specific Ghostty patches on the `ghostty-main`
+branch of `shinobuwz/oh-my-cmux`. Patches are not submitted upstream; sync
+upstream changes only when cmux needs them, then update this document and the
+parent submodule SHA.
 
 ## Fork update checklist
 
-1) Make changes in `ghostty/`.
-2) Commit and push to `manaflow-ai/ghostty`.
+1) Make changes in `ghostty/` on `ghostty-main`.
+2) Commit and push `ghostty-main` to `git@github.com:shinobuwz/oh-my-cmux.git`.
 3) Update this file with the new change summary + conflict notes.
 4) In the parent repo: `git add ghostty` and commit the submodule SHA.
+5) When an upstream sync is needed, fetch `manaflow-ai/ghostty` as `upstream`,
+   merge it into `ghostty-main`, resolve documented conflicts, and push.
 
 ## Current fork changes
 
-Current cmux pinned fork patch head: `b211341be`. It combines indented
-hard-newline link continuations with the presentation-token runtime from
-`24284c3ba` and is published through
-https://github.com/manaflow-ai/ghostty/pull/124.
-The corresponding universal ReleaseFast GhosttyKit archive is published at
-https://github.com/manaflow-ai/ghostty/releases/tag/xcframework-b211341be1ba902e772f57fc67c3e65d35205676-crashsubdir-cmux-crash-v1
-and pinned in `scripts/ghosttykit-checksums.txt`.
+Current personal fork patch head: `6f1ab4f9c`. It adds the owned-environment
+fix described below on top of `d8994a0e5`, the merged manaflow-ai Ghostty fork
+baseline containing the indented hard-newline link and presentation-token
+changes. There is no separately published GhosttyKit archive for `6f1ab4f9c`;
+build the universal framework with `ReleaseFast` when the pinned SHA changes.
 
 ### Indented hard-newline link continuations
 
