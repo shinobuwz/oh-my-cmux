@@ -610,7 +610,7 @@ class TabManager: ObservableObject {
                 rootPath: hasInitialDirectory ? normalizedInitialDirectory : nil,
                 repositoryCommonDirectory: nil,
                 remoteHost: nil,
-                isCollapsed: false,
+                isCollapsed: true,
                 lastActiveWorkspaceId: initialWorkspace.id
             ),
         ]
@@ -1285,7 +1285,7 @@ class TabManager: ObservableObject {
                 rootPath: nil,
                 repositoryCommonDirectory: nil,
                 remoteHost: workspace.remoteConfiguration?.destination,
-                isCollapsed: false,
+                isCollapsed: true,
                 lastActiveWorkspaceId: workspace.id
             )
         )
@@ -4583,7 +4583,7 @@ class TabManager: ObservableObject {
                     rootPath: rootPath,
                     repositoryCommonDirectory: nil,
                     remoteHost: entry.snapshot.remote?.destination,
-                    isCollapsed: false,
+                    isCollapsed: true,
                     lastActiveWorkspaceId: workspace.id
                 )
             )
@@ -6563,7 +6563,7 @@ extension TabManager {
                         rootPath: workspaceSnapshot.currentDirectory.isEmpty ? nil : workspaceSnapshot.currentDirectory,
                         repositoryCommonDirectory: nil,
                         remoteHost: workspaceSnapshot.remote?.destination,
-                        isCollapsed: false,
+                        isCollapsed: true,
                         lastActiveWorkspaceId: workspace.id
                     )
                 )
@@ -6589,7 +6589,7 @@ extension TabManager {
                         rootPath: workspaceSnapshot.currentDirectory.isEmpty ? nil : workspaceSnapshot.currentDirectory,
                         repositoryCommonDirectory: nil,
                         remoteHost: workspaceSnapshot.remote?.destination,
-                        isCollapsed: false,
+                        isCollapsed: true,
                         lastActiveWorkspaceId: workspace.id
                     )
                 )

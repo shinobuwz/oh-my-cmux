@@ -6588,6 +6588,14 @@ final class Workspace: Identifiable, ObservableObject {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private func defaultReplacementTerminalWorkingDirectory() -> String? {
+        guard !isRemoteWorkspace else { return nil }
+        return [boundRootPath, currentDirectory]
+            .lazy
+            .compactMap(Self.normalizedTerminalWorkingDirectory)
+            .first
+    }
+
     private func resolvedTerminalStartupWorkingDirectory(
         requestedWorkingDirectory: String?,
         sourcePanelId: UUID?
@@ -9721,10 +9729,14 @@ final class Workspace: Identifiable, ObservableObject {
             workspaceId: id,
             context: GHOSTTY_SURFACE_CONTEXT_TAB,
             configTemplate: replacementConfig,
+            workingDirectory: pendingRemoteDisconnect == nil
+                ? defaultReplacementTerminalWorkingDirectory()
+                : nil,
             portOrdinal: portOrdinal,
             initialCommand: replacementInitialCommand,
             additionalEnvironment: startupEnvironmentMergingWorkspaceEnvironment([:])
         )
+
         configureNewTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle

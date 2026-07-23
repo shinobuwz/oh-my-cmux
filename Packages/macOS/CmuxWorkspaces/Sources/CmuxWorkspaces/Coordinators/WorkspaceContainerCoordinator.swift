@@ -76,7 +76,7 @@ public final class WorkspaceContainerCoordinator<Tab: WorkspaceTabRepresenting> 
             rootPath: rootPath,
             repositoryCommonDirectory: repositoryCommonDirectory,
             remoteHost: remoteHost,
-            isCollapsed: false,
+            isCollapsed: true,
             lastActiveWorkspaceId: leaf.id
         )
         model.workspaceContainers.append(container)

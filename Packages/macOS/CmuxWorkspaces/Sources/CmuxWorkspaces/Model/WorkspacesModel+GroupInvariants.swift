@@ -96,9 +96,9 @@ extension WorkspacesModel {
     // MARK: - Selection
 
     /// Records the selected leaf on its container and group (their
-    /// `lastActiveWorkspaceId`) and expands both ancestors so the row is
-    /// visible. Call from the selection `didSet` host hook (replaces the
-    /// legacy group auto-expand). No-op for `nil` or orphan leaves.
+    /// `lastActiveWorkspaceId`) and expands the top-level group so the active
+    /// container remains visible. The container keeps its explicit disclosure
+    /// state; selecting its active leaf must not expand terminal rows implicitly.
     public func recordSelection(ofLeaf leafId: UUID?) {
         guard let leafId,
               let leaf = tabs.first(where: { $0.id == leafId }),
@@ -107,7 +107,6 @@ extension WorkspacesModel {
             return
         }
         workspaceContainers[containerIndex].lastActiveWorkspaceId = leafId
-        workspaceContainers[containerIndex].isCollapsed = false
         let groupId = workspaceContainers[containerIndex].groupId
         if let groupIndex = workspaceGroups.firstIndex(where: { $0.id == groupId }) {
             workspaceGroups[groupIndex].lastActiveWorkspaceId = leafId
