@@ -678,17 +678,17 @@ const Subprocess = struct {
                 log.warn("failed to get ghostty exe path err={}", .{err});
                 break :ghostty_path;
             };
-            const ghostty_bin = resolveGhosttyBin(&env, exe_bin_path) orelse {
+            const resolved_ghostty_bin = resolveGhosttyBin(&env, exe_bin_path) orelse {
                 log.warn("failed to resolve ghostty CLI path; CLI shell integration disabled", .{});
                 break :ghostty_path;
             };
+            // `resolved_ghostty_bin` may point into the existing GHOSTTY_BIN
+            // value. Replacing that entry invalidates the slice, so refetch the
+            // owned copy before deriving and storing its directory.
+            try env.put("GHOSTTY_BIN", resolved_ghostty_bin);
+            const ghostty_bin = env.get("GHOSTTY_BIN") orelse unreachable;
             const bin_dir = std.fs.path.dirname(ghostty_bin) orelse break :ghostty_path;
             log.debug("resolved ghostty CLI path={s}", .{ghostty_bin});
-
-            // Always export both forms so shell integration keeps an exact CLI
-            // path even if the shell later overwrites PATH. GHOSTTY_BIN_DIR is
-            // retained for the separate shell-integration `path` feature.
-            try env.put("GHOSTTY_BIN", ghostty_bin);
             try env.put("GHOSTTY_BIN_DIR", bin_dir);
 
             // Append if we have a path. We want to append so that ghostty is
