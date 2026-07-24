@@ -41,14 +41,52 @@ final class FileSystemEventStream: @unchecked Sendable {
     /// stream is recovered from the context's `info` pointer instead — passed
     /// *unretained* (see the type's "Context lifetime" note), so this uses
     /// `takeUnretainedValue()` and never adjusts the reference count.
-    private static let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+    private static let callback: FSEventStreamCallback = { _, info, eventCount, rawPaths, eventFlags, _ in
         guard let info else { return }
-        Unmanaged<FileSystemEventStream>.fromOpaque(info).takeUnretainedValue().onEvent()
+        let owner = Unmanaged<FileSystemEventStream>.fromOpaque(info).takeUnretainedValue()
+        let paths = rawPaths.assumingMemoryBound(to: UnsafePointer<CChar>.self)
+        var changedPaths = Set<String>()
+        var structurallyChangedPaths = Set<String>()
+        var requiresFullRescan = false
+
+        let structuralMask = FSEventStreamEventFlags(
+            kFSEventStreamEventFlagItemCreated |
+            kFSEventStreamEventFlagItemRemoved |
+            kFSEventStreamEventFlagItemRenamed |
+            kFSEventStreamEventFlagItemCloned
+        )
+        let fullRescanMask = FSEventStreamEventFlags(
+            kFSEventStreamEventFlagMustScanSubDirs |
+            kFSEventStreamEventFlagUserDropped |
+            kFSEventStreamEventFlagKernelDropped |
+            kFSEventStreamEventFlagEventIdsWrapped |
+            kFSEventStreamEventFlagRootChanged |
+            kFSEventStreamEventFlagMount |
+            kFSEventStreamEventFlagUnmount
+        )
+
+        for index in 0..<Int(eventCount) {
+            let path = String(cString: paths[index])
+            let flags = eventFlags[index]
+            changedPaths.insert(path)
+            if flags & structuralMask != 0 {
+                structurallyChangedPaths.insert(path)
+            }
+            if flags & fullRescanMask != 0 {
+                requiresFullRescan = true
+            }
+        }
+        guard !changedPaths.isEmpty || requiresFullRescan else { return }
+        owner.onEvent(RecursivePathWatcherEvent(
+            changedPaths: changedPaths,
+            structurallyChangedPaths: structurallyChangedPaths,
+            requiresFullRescan: requiresFullRescan
+        ))
     }
 
-    /// The non-blocking sink invoked on the shared queue for each coalesced batch
-    /// of filesystem events.
-    private let onEvent: @Sendable () -> Void
+    /// The non-blocking sink invoked on the shared queue for each filesystem
+    /// event batch, including its changed paths and structural-change flags.
+    private let onEvent: @Sendable (RecursivePathWatcherEvent) -> Void
     private var stream: FSEventStreamRef?
 
     /// Creates and starts a stream for `paths`.
@@ -57,10 +95,14 @@ final class FileSystemEventStream: @unchecked Sendable {
     ///   - paths: The files and directories to watch. Must be non-empty.
     ///   - latency: The FSEvents coalescing latency in seconds.
     ///   - onEvent: A non-blocking sink invoked on the shared queue for each
-    ///     coalesced batch of filesystem events.
+    ///     filesystem event batch.
     /// - Returns: `nil` if `paths` is empty or the underlying `FSEventStream`
     ///   could not be created or started.
-    init?(paths: [String], latency: TimeInterval, onEvent: @escaping @Sendable () -> Void) {
+    init?(
+        paths: [String],
+        latency: TimeInterval,
+        onEvent: @escaping @Sendable (RecursivePathWatcherEvent) -> Void
+    ) {
         guard !paths.isEmpty else { return nil }
         self.onEvent = onEvent
         self.stream = nil
@@ -72,7 +114,9 @@ final class FileSystemEventStream: @unchecked Sendable {
             release: nil,
             copyDescription: nil
         )
-        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents)
+        let flags = FSEventStreamCreateFlags(
+            kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot
+        )
         guard let stream = FSEventStreamCreate(
             nil,
             Self.callback,

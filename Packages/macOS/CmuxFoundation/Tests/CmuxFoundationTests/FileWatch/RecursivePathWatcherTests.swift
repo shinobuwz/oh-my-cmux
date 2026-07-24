@@ -64,30 +64,38 @@ private actor GateClock: FileWatchClock {
         let watcher = RecursivePathWatcher(testThrottleClock: clock)
         var iterator = watcher.events.makeAsyncIterator()
 
-        // Window 1: five events, but only the first arms the throttle.
-        for _ in 0..<5 {
-            await watcher.simulateFileSystemEventForTesting()
+        // Window 1: five events merge into one batch and preserve every path.
+        for index in 0..<5 {
+            await watcher.simulateFileSystemEventForTesting(RecursivePathWatcherEvent(
+                changedPaths: ["/first/\(index)"],
+                structurallyChangedPaths: index == 2 ? ["/first/2"] : [],
+                requiresFullRescan: index == 4
+            ))
         }
         await clock.waitForSleeper()
         #expect(await clock.sleeperCount == 1)
 
         await clock.releaseOne()
-        let first: Void? = await iterator.next()
-        #expect(first != nil)
+        let first = await iterator.next()
+        #expect(first?.changedPaths == Set((0..<5).map { "/first/\($0)" }))
+        #expect(first?.structurallyChangedPaths == ["/first/2"])
+        #expect(first?.requiresFullRescan == true)
 
         // Window 2: the throttle re-arms after the previous flush.
-        for _ in 0..<3 {
-            await watcher.simulateFileSystemEventForTesting()
+        for index in 0..<3 {
+            await watcher.simulateFileSystemEventForTesting(RecursivePathWatcherEvent(
+                changedPaths: ["/second/\(index)"]
+            ))
         }
         await clock.waitForSleeper()
         #expect(await clock.sleeperCount == 1)
 
         await clock.releaseOne()
-        let second: Void? = await iterator.next()
-        #expect(second != nil)
+        let second = await iterator.next()
+        #expect(second?.changedPaths == Set((0..<3).map { "/second/\($0)" }))
 
         await watcher.stop()
-        let afterStop: Void? = await iterator.next()
+        let afterStop: RecursivePathWatcherEvent? = await iterator.next()
         #expect(afterStop == nil)
     }
 
@@ -98,8 +106,8 @@ private actor GateClock: FileWatchClock {
         var iterator = watcher.events.makeAsyncIterator()
 
         await watcher.stop()
-        await watcher.simulateFileSystemEventForTesting()
-        let next: Void? = await iterator.next()
+        await watcher.simulateFileSystemEventForTesting(RecursivePathWatcherEvent(changedPaths: ["/ignored"]))
+        let next: RecursivePathWatcherEvent? = await iterator.next()
         #expect(next == nil)
         #expect(await clock.sleeperCount == 0)
     }

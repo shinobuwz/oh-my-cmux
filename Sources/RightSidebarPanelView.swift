@@ -83,6 +83,11 @@ enum FileExplorerRootSyncPolicy {
             return false
         }
     }
+
+    static func shouldMonitorFileExplorerStore(isRightSidebarVisible: Bool, mode: RightSidebarMode) -> Bool {
+        guard isRightSidebarVisible else { return false }
+        return mode == .files || mode == .find
+    }
 }
 
 extension RightSidebarMode {

@@ -21,9 +21,9 @@ struct FileExplorerRootSyncPolicyTests {
         }
     }
 
-    @Test("Visible Files and Find may sync file explorer root")
+    @Test("Visible Files, Find, and Diff may sync file explorer root")
     func visibleFileModesMaySyncFileExplorerRoot() {
-        for mode in [RightSidebarMode.files, .find] {
+        for mode in [RightSidebarMode.files, .find, .diff] {
             #expect(
                 FileExplorerRootSyncPolicy.shouldSyncFileExplorerStore(
                     isRightSidebarVisible: true,
@@ -33,10 +33,23 @@ struct FileExplorerRootSyncPolicyTests {
         }
     }
 
+    @Test("Only visible Files and Find monitor the file tree")
+    func onlyVisibleTreeModesMonitorFileExplorer() {
+        for mode in RightSidebarMode.allCases {
+            let expected = mode == .files || mode == .find
+            #expect(
+                FileExplorerRootSyncPolicy.shouldMonitorFileExplorerStore(
+                    isRightSidebarVisible: true,
+                    mode: mode
+                ) == expected
+            )
+        }
+    }
+
     @Test("Visible non-file modes keep file explorer root lazy")
     func visibleNonFileModesKeepFileExplorerRootLazy() {
-        let fileModes = Set([RightSidebarMode.files, .find])
-        for mode in RightSidebarMode.allCases.filter({ !fileModes.contains($0) }) {
+        let rootModes = Set([RightSidebarMode.files, .find, .diff])
+        for mode in RightSidebarMode.allCases.filter({ !rootModes.contains($0) }) {
             #expect(
                 FileExplorerRootSyncPolicy.shouldSyncFileExplorerStore(
                     isRightSidebarVisible: true,

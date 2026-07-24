@@ -1,4 +1,5 @@
 import AppKit
+import CmuxFoundation
 import Testing
 
 #if canImport(cmux_DEV)
@@ -442,6 +443,206 @@ struct FileExplorerStoreTests {
         let newSrcNode = store.rootNodes.first { $0.name == "src" }
         #expect(newSrcNode != nil)
         #expect(newSrcNode?.children?.count == 2)
+    }
+
+    @Test
+    func testMonitoringSuspendsTreeWorkUntilFilesBecomesActive() async throws {
+        let rootPath = "/project"
+        let provider = MockFileExplorerProvider(homePath: "/")
+        provider.listings[rootPath] = .success([
+            FileExplorerEntry(name: "src", path: "\(rootPath)/src", isDirectory: true),
+        ])
+        let store = FileExplorerStore()
+        store.setProviderForTesting(provider)
+
+        store.setMonitoringEnabled(false)
+        store.setRootPath(rootPath)
+        #expect(provider.listCallPaths.isEmpty)
+        #expect(store.rootNodes.isEmpty)
+
+        store.setMonitoringEnabled(true)
+        try await waitFor("root loads after monitoring resumes") { store.rootNodes.count == 1 }
+        #expect(provider.listCallPaths == [rootPath])
+
+        provider.listCallPaths.removeAll()
+        store.setMonitoringEnabled(false)
+        store.handleDirectoryWatcherEvent(RecursivePathWatcherEvent(
+            changedPaths: ["\(rootPath)/new.swift"],
+            structurallyChangedPaths: ["\(rootPath)/new.swift"]
+        ))
+        #expect(provider.listCallPaths.isEmpty)
+        #expect(store.rootNodes.isEmpty)
+    }
+
+    @Test
+    func testFilesystemEventsRelistOnlyStructurallyChangedLoadedDirectory() async throws {
+        let rootPath = "/project"
+        let srcPath = "/project/src"
+        let docsPath = "/project/docs"
+        let provider = MockFileExplorerProvider(homePath: "/")
+        provider.listings[rootPath] = .success([
+            FileExplorerEntry(name: "src", path: srcPath, isDirectory: true),
+            FileExplorerEntry(name: "docs", path: docsPath, isDirectory: true),
+        ])
+        provider.listings[srcPath] = .success([
+            FileExplorerEntry(name: "old.swift", path: "\(srcPath)/old.swift", isDirectory: false),
+        ])
+        provider.listings[docsPath] = .success([
+            FileExplorerEntry(name: "guide.md", path: "\(docsPath)/guide.md", isDirectory: false),
+        ])
+
+        let store = FileExplorerStore()
+        store.setProviderForTesting(provider)
+        store.setRootPath(rootPath)
+        try await waitFor("root loaded") { store.rootNodes.count == 2 }
+        let srcNode = try #require(store.rootNodes.first { $0.path == srcPath })
+        let docsNode = try #require(store.rootNodes.first { $0.path == docsPath })
+        store.expand(node: srcNode)
+        store.expand(node: docsNode)
+        try await waitFor("both directories loaded") {
+            srcNode.children?.count == 1 && docsNode.children?.count == 1
+        }
+        provider.listCallPaths.removeAll()
+
+        store.handleDirectoryWatcherEvent(RecursivePathWatcherEvent(
+            changedPaths: ["\(srcPath)/old.swift"]
+        ))
+        #expect(provider.listCallPaths.isEmpty)
+
+        provider.listings[srcPath] = .success([
+            FileExplorerEntry(name: "old.swift", path: "\(srcPath)/old.swift", isDirectory: false),
+            FileExplorerEntry(name: "new.swift", path: "\(srcPath)/new.swift", isDirectory: false),
+        ])
+        store.handleDirectoryWatcherEvent(RecursivePathWatcherEvent(
+            changedPaths: ["\(srcPath)/new.swift"],
+            structurallyChangedPaths: ["\(srcPath)/new.swift"]
+        ))
+
+        try await waitFor("changed directory relisted") { srcNode.children?.count == 2 }
+        #expect(store.rootNodes.first { $0.path == srcPath } === srcNode)
+        #expect(docsNode.children?.map(\.name) == ["guide.md"])
+        #expect(provider.listCallPaths == [srcPath])
+    }
+
+    @Test
+    func testTypeReplacementPurgesExpandedDirectoryState() async throws {
+        let rootPath = "/project"
+        let itemPath = "\(rootPath)/item"
+        let provider = MockFileExplorerProvider(homePath: "/")
+        provider.listings[rootPath] = .success([
+            FileExplorerEntry(name: "item", path: itemPath, isDirectory: true),
+        ])
+        provider.listings[itemPath] = .success([
+            FileExplorerEntry(name: "old.txt", path: "\(itemPath)/old.txt", isDirectory: false),
+        ])
+        let store = FileExplorerStore()
+        store.setProviderForTesting(provider)
+        store.setRootPath(rootPath)
+        try await waitFor("directory root loaded") { store.rootNodes.count == 1 }
+
+        let directoryNode = try #require(store.rootNodes.first)
+        store.select(node: directoryNode)
+        store.expand(node: directoryNode)
+        try await waitFor("directory child loaded") { directoryNode.children?.count == 1 }
+        #expect(store.expandedPaths.contains(itemPath))
+
+        provider.listings[rootPath] = .success([
+            FileExplorerEntry(name: "item", path: itemPath, isDirectory: false),
+        ])
+        store.handleDirectoryWatcherEvent(RecursivePathWatcherEvent(
+            changedPaths: [itemPath],
+            structurallyChangedPaths: [itemPath]
+        ))
+
+        try await waitFor("directory replaced by file") {
+            store.rootNodes.first?.isDirectory == false
+        }
+        #expect(!store.expandedPaths.contains(itemPath))
+        #expect(store.rootNodes.first !== directoryNode)
+        #expect(store.selectedPath == itemPath)
+        #expect(store.selectedPaths == [itemPath])
+    }
+
+    @Test
+    func testNestedFileCreationReloadsExpandedDirectory() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-file-explorer-\(UUID().uuidString)", isDirectory: true)
+        let nestedURL = rootURL.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedURL, withIntermediateDirectories: true)
+        let existingURL = nestedURL.appendingPathComponent("existing.txt")
+        try Data("existing".utf8).write(to: existingURL)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let store = FileExplorerStore()
+        store.setProviderForTesting(LocalFileExplorerProvider())
+        store.setRootPath(rootURL.path)
+        try await waitFor("local root loaded") {
+            store.rootNodes.contains { $0.path == nestedURL.path }
+        }
+
+        let nestedNode = try #require(store.rootNodes.first { $0.path == nestedURL.path })
+        store.expand(node: nestedNode)
+        try await waitFor("nested directory loaded") {
+            nestedNode.children?.contains { $0.path == existingURL.path } == true
+        }
+
+        let createdURL = nestedURL.appendingPathComponent("created.txt")
+        try Data("created".utf8).write(to: createdURL)
+
+        try await waitFor("nested directory refreshed after file creation") {
+            store.rootNodes
+                .first { $0.path == nestedURL.path }?
+                .children?
+                .contains { $0.path == createdURL.path } == true
+        }
+        store.applyWorkspaceRoot(.none)
+    }
+
+    @Test
+    func testReloadReplacesVisibleNodesWhenRootCountIsUnchanged() async throws {
+        let rootPath = "/project"
+        let nestedPath = "/project/src"
+        let provider = MockFileExplorerProvider(homePath: "/")
+        provider.listings[rootPath] = .success([
+            FileExplorerEntry(name: "src", path: nestedPath, isDirectory: true),
+        ])
+        provider.listings[nestedPath] = .success([
+            FileExplorerEntry(name: "old.txt", path: "\(nestedPath)/old.txt", isDirectory: false),
+        ])
+
+        let store = FileExplorerStore()
+        store.setProviderForTesting(provider)
+        store.setRootPath(rootPath)
+        try await waitFor("initial root loaded") { store.rootNodes.count == 1 }
+        let initialNode = try #require(store.rootNodes.first)
+        store.expand(node: initialNode)
+        try await waitFor("initial child loaded") { initialNode.children?.count == 1 }
+
+        let state = FileExplorerState()
+        let coordinator = FileExplorerPanelView.Coordinator(
+            store: store,
+            state: state,
+            onOpenFilePreview: { _ in }
+        )
+        let container = FileExplorerContainerView(coordinator: coordinator, presentation: .files)
+        coordinator.containerView = container
+        coordinator.reloadIfNeeded()
+
+        provider.listings[nestedPath] = .success([
+            FileExplorerEntry(name: "new.txt", path: "\(nestedPath)/new.txt", isDirectory: false),
+        ])
+        store.reload()
+        try await waitFor("reloaded child loaded") {
+            store.rootNodes.first?.children?.first?.name == "new.txt"
+        }
+        coordinator.reloadIfNeeded()
+
+        let outlineView = try #require(coordinator.outlineView)
+        let visibleNames = (0..<outlineView.numberOfRows).compactMap {
+            (outlineView.item(atRow: $0) as? FileExplorerNode)?.name
+        }
+        #expect(visibleNames.contains("new.txt"))
+        #expect(!visibleNames.contains("old.txt"))
     }
 
     // MARK: - SSH hydration

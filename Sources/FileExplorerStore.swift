@@ -187,12 +187,7 @@ final class FileExplorerNode: Identifiable {
 
     var isExpandable: Bool { isDirectory }
 
-    var sortedChildren: [FileExplorerNode]? {
-        children?.sorted { a, b in
-            if a.isDirectory != b.isDirectory { return a.isDirectory }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-        }
-    }
+    var sortedChildren: [FileExplorerNode]? { children }
 }
 
 // MARK: - Root Resolver
@@ -713,6 +708,9 @@ final class FileExplorerStore: ObservableObject {
     @Published private(set) var isRootLoading: Bool = false
     @Published private(set) var gitStatusByPath: [String: GitFileStatus] = [:]
     @Published private(set) var contentRevision = 0
+    private(set) var treeRevision = 0
+    private(set) var fullTreeRevision = 0
+    private(set) var gitStatusRevision = 0
     @Published private(set) var rootStatusMessage: String?
     private(set) var workspaceRootIdentity: UUID?
 
@@ -721,13 +719,20 @@ final class FileExplorerStore: ObservableObject {
     /// Whether hidden files are shown. Set from FileExplorerState externally.
     var showHiddenFiles: Bool = false
 
-    /// Watches the root directory for filesystem changes (local only).
-    private var directoryWatcher: FileWatcher?
+    /// Watches the full local workspace subtree for filesystem changes.
+    private var directoryWatcher: RecursivePathWatcher?
     private var directoryWatchTask: Task<Void, Never>?
     private var directoryWatchPath: String?
-    /// Periodic git-status refresh so deeply-nested changes (which the
-    /// non-recursive root watcher cannot see) still surface within a few seconds.
+    private var directoryWatchCanonicalPath: String?
+    /// Periodic git-status refresh remains a backstop for remote roots and any
+    /// filesystem events that the local recursive watcher cannot deliver.
     private var periodicGitRefreshTask: Task<Void, Never>?
+    private var gitStatusEventRefreshTask: Task<Void, Never>?
+    /// Files/Find own the directory tree. Git Diff keeps the root identity but
+    /// suspends tree and Git-status work because its snapshot store owns that mode.
+    private var isMonitoringEnabled = true
+    private var gitStatusRefreshGeneration: UInt64 = 0
+
 
     /// Paths that are logically expanded (persisted across provider changes)
     private(set) var expandedPaths: Set<String> = []
@@ -746,6 +751,7 @@ final class FileExplorerStore: ObservableObject {
 
     /// In-flight load tasks keyed by path
     private var loadTasks: [String: Task<Void, Never>] = [:]
+    private var pendingDirectoryRefreshPaths: Set<String> = []
 
     /// Cache of path -> node for quick lookup
     private var nodesByPath: [String: FileExplorerNode] = [:]
@@ -757,9 +763,17 @@ final class FileExplorerStore: ObservableObject {
     private var remoteHomeResolutionKey: String?
 
     private let gitStatusProvider: GitStatusProvider
+    private let gitStatusRefreshClock: any FileWatchClock
+    private let gitStatusRefreshDelay: Duration
 
-    init(gitStatusProvider: GitStatusProvider = GitStatusProvider()) {
+    init(
+        gitStatusProvider: GitStatusProvider = GitStatusProvider(),
+        gitStatusRefreshClock: any FileWatchClock = SystemFileWatchClock(),
+        gitStatusRefreshDelay: Duration = .seconds(1)
+    ) {
         self.gitStatusProvider = gitStatusProvider
+        self.gitStatusRefreshClock = gitStatusRefreshClock
+        self.gitStatusRefreshDelay = gitStatusRefreshDelay
     }
 
     var displayRootPath: String {
@@ -804,6 +818,28 @@ final class FileExplorerStore: ObservableObject {
     }
     private func setWorkspaceRootIdentity(_ identity: UUID?) { guard workspaceRootIdentity != identity else { return }; objectWillChange.send(); workspaceRootIdentity = identity }
 
+    func setMonitoringEnabled(_ enabled: Bool) {
+        guard isMonitoringEnabled != enabled else { return }
+        isMonitoringEnabled = enabled
+        gitStatusRefreshGeneration &+= 1
+        if enabled {
+            reload()
+            refreshGitStatus()
+            updateDirectoryWatcher()
+            updatePeriodicGitRefresh()
+            return
+        }
+
+        stopDirectoryWatcher()
+        periodicGitRefreshTask?.cancel()
+        periodicGitRefreshTask = nil
+        reload()
+        if !gitStatusByPath.isEmpty {
+            gitStatusRevision &+= 1
+            gitStatusByPath = [:]
+        }
+    }
+
     func setRootPath(_ path: String) {
         guard path != rootPath else {
             #if DEBUG
@@ -819,6 +855,8 @@ final class FileExplorerStore: ObservableObject {
             selectedPaths = []
             pendingDescendIntoFirstChildPath = nil
         }
+        gitStatusEventRefreshTask?.cancel()
+        gitStatusEventRefreshTask = nil
         rootPath = path
         reload()
         refreshGitStatus()
@@ -827,35 +865,53 @@ final class FileExplorerStore: ObservableObject {
     }
 
     func refreshGitStatus() {
+        guard isMonitoringEnabled else { return }
+        gitStatusRefreshGeneration &+= 1
+        let generation = gitStatusRefreshGeneration
         guard !rootPath.isEmpty else {
-            gitStatusByPath = [:]
+            if !gitStatusByPath.isEmpty {
+                gitStatusRevision &+= 1
+                gitStatusByPath = [:]
+            }
             return
         }
         let path = rootPath
+        let gitStatusProvider = self.gitStatusProvider
         if let sshProvider = provider as? SSHFileExplorerProvider {
             let dest = sshProvider.destination
             let port = sshProvider.port
             let identity = sshProvider.identityFile
             let opts = sshProvider.sshOptions
-            let gitStatusProvider = self.gitStatusProvider
-            DispatchQueue.global(qos: .utility).async {
-                let status = gitStatusProvider.fetchStatusSSH(
-                    directory: path, destination: dest, port: port,
-                    identityFile: identity, sshOptions: opts
-                )
-                DispatchQueue.main.async { [weak self] in
-                    self?.gitStatusByPath = status
-                }
+            Task { @MainActor [weak self] in
+                let status = await Task.detached(priority: .utility) {
+                    gitStatusProvider.fetchStatusSSH(
+                        directory: path, destination: dest, port: port,
+                        identityFile: identity, sshOptions: opts
+                    )
+                }.value
+                self?.applyGitStatus(status, expectedRootPath: path, expectedGeneration: generation)
             }
         } else {
-            let gitStatusProvider = self.gitStatusProvider
-            DispatchQueue.global(qos: .utility).async {
-                let status = gitStatusProvider.fetchStatus(directory: path)
-                DispatchQueue.main.async { [weak self] in
-                    self?.gitStatusByPath = status
-                }
+            Task { @MainActor [weak self] in
+                let status = await Task.detached(priority: .utility) {
+                    gitStatusProvider.fetchStatus(directory: path)
+                }.value
+                self?.applyGitStatus(status, expectedRootPath: path, expectedGeneration: generation)
             }
         }
+    }
+
+    @MainActor
+    private func applyGitStatus(
+        _ status: [String: GitFileStatus],
+        expectedRootPath: String,
+        expectedGeneration: UInt64
+    ) {
+        guard isMonitoringEnabled,
+              rootPath == expectedRootPath,
+              gitStatusRefreshGeneration == expectedGeneration else { return }
+        gitStatusRevision &+= 1
+        gitStatusByPath = status
     }
 
     func materializeRemoteFileForPreview(path: String) async throws -> URL {
@@ -871,32 +927,112 @@ final class FileExplorerStore: ObservableObject {
     }
 
     private func updateDirectoryWatcher() {
-        if provider is LocalFileExplorerProvider, !rootPath.isEmpty {
+        if isMonitoringEnabled, provider is LocalFileExplorerProvider, !rootPath.isEmpty {
             guard directoryWatchPath != rootPath || directoryWatcher == nil else { return }
             stopDirectoryWatcher()
-            // Preserve the previous 0.3s coalescing as a leading-edge throttle.
-            let watcher = FileWatcher(path: rootPath, throttle: .milliseconds(300))
+            let canonicalRootPath = URL(fileURLWithPath: rootPath).resolvingSymlinksInPath().path
+            guard let watcher = RecursivePathWatcher(paths: [canonicalRootPath]) else { return }
             directoryWatcher = watcher
             directoryWatchPath = rootPath
+            directoryWatchCanonicalPath = canonicalRootPath
             let events = watcher.events
             directoryWatchTask = Task { @MainActor [weak self] in
-                for await _ in events {
+                for await event in events {
                     guard let self else { break }
-                    self.reload()
-                    self.refreshGitStatus()
+                    self.handleDirectoryWatcherEvent(event)
                 }
             }
         } else {
             stopDirectoryWatcher()
         }
     }
-    /// Starts or restarts a bounded periodic git-status refresh. The root
-    /// `FileWatcher` is non-recursive (DispatchSource on one directory), so
-    /// edits to deeply-nested files do not fire a directory event at the root.
-    /// This timer is the backstop that re-pulls status every few seconds.
+    @MainActor
+    func handleDirectoryWatcherEvent(_ event: RecursivePathWatcherEvent) {
+        guard isMonitoringEnabled, !rootPath.isEmpty else { return }
+        if event.requiresFullRescan {
+            reload()
+        } else {
+            contentRevision &+= 1
+            refreshDirectories(affectedBy: event.structurallyChangedPaths)
+        }
+        scheduleGitStatusRefreshAfterFilesystemEvent()
+    }
+
+    @MainActor
+    private func refreshDirectories(affectedBy changedPaths: Set<String>) {
+        var directories = Set<String>()
+        for changedPath in changedPaths {
+            guard let path = explorerPath(forWatchedPath: changedPath) else { continue }
+            if path == rootPath {
+                directories.insert(rootPath)
+                continue
+            }
+            let parentPath = (path as NSString).deletingLastPathComponent
+            if Self.path(parentPath, isContainedIn: rootPath) {
+                directories.insert(parentPath)
+            }
+            if let node = nodesByPath[path], node.isDirectory, node.children != nil {
+                directories.insert(path)
+            }
+        }
+        for directory in directories {
+            scheduleDirectoryRefresh(at: directory)
+        }
+    }
+
+    @MainActor
+    private func scheduleDirectoryRefresh(at path: String) {
+        let parentNode: FileExplorerNode?
+        if path == rootPath {
+            parentNode = nil
+        } else {
+            guard let node = nodesByPath[path], node.isDirectory, node.children != nil else { return }
+            parentNode = node
+        }
+        guard loadTasks[path] == nil, !loadingPaths.contains(path) else {
+            pendingDirectoryRefreshPaths.insert(path)
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.loadChildren(for: parentNode, at: path, silent: true)
+        }
+        loadTasks[path] = task
+    }
+
+    @MainActor
+    private func scheduleGitStatusRefreshAfterFilesystemEvent() {
+        gitStatusEventRefreshTask?.cancel()
+        let clock = gitStatusRefreshClock
+        let delay = gitStatusRefreshDelay
+        gitStatusEventRefreshTask = Task { @MainActor [weak self] in
+            // A cancellable trailing debounce prevents sustained edits from spawning git continuously.
+            do { try await clock.sleep(for: delay) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.gitStatusEventRefreshTask = nil
+            self.refreshGitStatus()
+        }
+    }
+    private func explorerPath(forWatchedPath watchedPath: String) -> String? {
+        let path = (watchedPath as NSString).standardizingPath
+        if Self.path(path, isContainedIn: rootPath) {
+            return path
+        }
+        guard let canonicalRoot = directoryWatchCanonicalPath,
+              Self.path(path, isContainedIn: canonicalRoot) else {
+            return nil
+        }
+        let suffix = path.dropFirst(canonicalRoot.count)
+        let relativePath = suffix.drop(while: { $0 == "/" })
+        guard !relativePath.isEmpty else { return rootPath }
+        return (rootPath as NSString).appendingPathComponent(String(relativePath))
+    }
+
+    /// Starts or restarts the remote-only periodic git-status refresh. Local
+    /// roots refresh from filesystem events and never run a continuous scan.
     private func updatePeriodicGitRefresh() {
         periodicGitRefreshTask?.cancel()
-        guard !rootPath.isEmpty else {
+        guard isMonitoringEnabled, !rootPath.isEmpty, provider is SSHFileExplorerProvider else {
             periodicGitRefreshTask = nil
             return
         }
@@ -910,12 +1046,15 @@ final class FileExplorerStore: ObservableObject {
     }
 
     /// Cancels the directory-watch consumer and drops the watcher; the watcher's
-    /// deinit cancels its `DispatchSource`s synchronously.
+    /// deinit tears down its FSEventStream synchronously.
     private func stopDirectoryWatcher() {
         directoryWatchTask?.cancel()
         directoryWatchTask = nil
         directoryWatcher = nil
         directoryWatchPath = nil
+        directoryWatchCanonicalPath = nil
+        gitStatusEventRefreshTask?.cancel()
+        gitStatusEventRefreshTask = nil
     }
 
     private func setProvider(_ newProvider: FileExplorerProvider?, reloadIfAvailable: Bool = true) {
@@ -940,9 +1079,12 @@ final class FileExplorerStore: ObservableObject {
         NSLog("[FileExplorer] reload() path=\(rootPath) provider=\(type(of: provider).self)")
         #endif
         contentRevision &+= 1
+        treeRevision &+= 1
+        fullTreeRevision &+= 1
         cancelAllLoads()
         rootNodes = []
         nodesByPath = [:]
+        guard isMonitoringEnabled else { return }
         guard !rootPath.isEmpty, provider != nil else { return }
         isRootLoading = true
         let path = rootPath
@@ -959,6 +1101,7 @@ final class FileExplorerStore: ObservableObject {
         if node.children == nil, loadTasks[node.path] == nil, !loadingPaths.contains(node.path) {
             node.isLoading = true
             node.error = nil
+            treeRevision &+= 1
             objectWillChange.send()
             let nodePath = node.path
             let task = Task { [weak self] in
@@ -974,6 +1117,7 @@ final class FileExplorerStore: ObservableObject {
         if pendingDescendIntoFirstChildPath == node.path {
             pendingDescendIntoFirstChildPath = nil
         }
+        treeRevision &+= 1
         objectWillChange.send()
     }
 
@@ -1051,20 +1195,45 @@ final class FileExplorerStore: ObservableObject {
         if !silent {
             loadingPaths.insert(path)
             parentNode?.error = nil
+            treeRevision &+= 1
             objectWillChange.send()
         }
 
         do {
+            try Task.checkCancellation()
             let entries = try await provider.listDirectory(path: path, showHidden: showHiddenFiles)
             try Task.checkCancellation()
+            let previousChildren = parentNode.map { $0.children ?? [] } ?? rootNodes
+            let previousByPath = Dictionary(uniqueKeysWithValues: previousChildren.map { ($0.path, $0) })
             let children = entries.map { entry in
-                let node = FileExplorerNode(name: entry.name, path: entry.path, isDirectory: entry.isDirectory)
+                let node: FileExplorerNode
+                if let existing = previousByPath[entry.path] {
+                    if existing.isDirectory == entry.isDirectory {
+                        node = existing
+                    } else {
+                        removeNodeFromCache(existing, preservingSelectionAtPath: entry.path)
+                        node = FileExplorerNode(name: entry.name, path: entry.path, isDirectory: entry.isDirectory)
+                    }
+                } else {
+                    node = FileExplorerNode(name: entry.name, path: entry.path, isDirectory: entry.isDirectory)
+                }
                 nodesByPath[entry.path] = node
                 return node
             }.sorted { a, b in
                 if a.isDirectory != b.isDirectory { return a.isDirectory }
                 return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
             }
+
+            let nextPaths = Set(children.map(\.path))
+            for removedNode in previousChildren where !nextPaths.contains(removedNode.path) {
+                removeNodeFromCache(removedNode)
+            }
+            let rootListingChanged = parentNode == nil && (
+                previousChildren.count != children.count ||
+                !zip(previousChildren, children).allSatisfy {
+                    $0.path == $1.path && $0.isDirectory == $1.isDirectory
+                }
+            )
 
             if let parentNode {
                 parentNode.children = children
@@ -1077,6 +1246,9 @@ final class FileExplorerStore: ObservableObject {
                     pendingDescendIntoFirstChildPath = nil
                 }
             } else {
+                if rootListingChanged {
+                    fullTreeRevision &+= 1
+                }
                 rootNodes = children
                 isRootLoading = false
                 setRootStatusMessage(nil)
@@ -1087,19 +1259,26 @@ final class FileExplorerStore: ObservableObject {
             }
             loadingPaths.remove(path)
             loadTasks.removeValue(forKey: path)
+            treeRevision &+= 1
             objectWillChange.send()
 
-            // Auto-expand children that were previously expanded
-            for child in children where child.isDirectory && expandedPaths.contains(child.path) {
+            // Fresh nodes for previously-expanded paths hydrate lazily. Reused
+            // nodes retain their cached descendants and require no disk access.
+            for child in children where child.isDirectory &&
+                child.children == nil &&
+                expandedPaths.contains(child.path) &&
+                loadTasks[child.path] == nil {
                 child.isLoading = true
+                treeRevision &+= 1
                 objectWillChange.send()
                 let childPath = child.path
-                let childTask = Task { [weak self] in
-                    guard let self else { return }
+                let childTask = Task { [weak self, weak child] in
+                    guard let self, let child else { return }
                     await self.loadChildren(for: child, at: childPath)
                 }
                 loadTasks[child.path] = childTask
             }
+            schedulePendingDirectoryRefreshIfNeeded(at: path)
         } catch {
             if !Task.isCancelled {
                 if let parentNode {
@@ -1111,9 +1290,43 @@ final class FileExplorerStore: ObservableObject {
                 }
                 loadingPaths.remove(path)
                 loadTasks.removeValue(forKey: path)
+                treeRevision &+= 1
                 objectWillChange.send()
+                schedulePendingDirectoryRefreshIfNeeded(at: path)
             }
         }
+    }
+
+
+    private func removeNodeFromCache(
+        _ node: FileExplorerNode,
+        preservingSelectionAtPath preservedPath: String? = nil
+    ) {
+        for child in node.children ?? [] {
+            removeNodeFromCache(child, preservingSelectionAtPath: preservedPath)
+        }
+        loadTasks.removeValue(forKey: node.path)?.cancel()
+        loadingPaths.remove(node.path)
+        pendingDirectoryRefreshPaths.remove(node.path)
+        prefetchWorkItems.removeValue(forKey: node.path)?.cancel()
+        if pendingDescendIntoFirstChildPath == node.path {
+            pendingDescendIntoFirstChildPath = nil
+        }
+        if nodesByPath[node.path] === node {
+            nodesByPath.removeValue(forKey: node.path)
+        }
+        expandedPaths.remove(node.path)
+        guard preservedPath != node.path else { return }
+        selectedPaths.remove(node.path)
+        if selectedPath == node.path {
+            selectedPath = nil
+        }
+    }
+
+    @MainActor
+    private func schedulePendingDirectoryRefreshIfNeeded(at path: String) {
+        guard pendingDirectoryRefreshPaths.remove(path) != nil else { return }
+        scheduleDirectoryRefresh(at: path)
     }
 
     private func cancelAllLoads() {
@@ -1123,6 +1336,7 @@ final class FileExplorerStore: ObservableObject {
         loadTasks.removeAll()
         loadingPaths.removeAll()
         pendingDescendIntoFirstChildPath = nil
+        pendingDirectoryRefreshPaths.removeAll()
         for (_, item) in prefetchWorkItems {
             item.cancel()
         }

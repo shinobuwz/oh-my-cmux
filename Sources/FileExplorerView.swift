@@ -93,6 +93,9 @@ struct FileExplorerPanelView: NSViewRepresentable {
         weak var containerView: FileExplorerContainerView?
         weak var outlineView: NSOutlineView?
         private var lastRootNodeCount: Int = -1
+        private var lastFullTreeRevision = -1
+        private var lastTreeRevision = -1
+        private var lastGitStatusRevision = -1
         private var observationCancellable: AnyCancellable?
         private var styleObserver: Any?
         private var isUpdatingOutlineProgrammatically = false
@@ -179,31 +182,59 @@ struct FileExplorerPanelView: NSViewRepresentable {
             )
 
             let newCount = store.rootNodes.count
+            let newFullTreeRevision = store.fullTreeRevision
+            let newTreeRevision = store.treeRevision
+            let newGitStatusRevision = store.gitStatusRevision
             withProgrammaticOutlineUpdate {
-                if newCount != lastRootNodeCount {
+                var didUpdateOutline = false
+                if newCount != lastRootNodeCount || newFullTreeRevision != lastFullTreeRevision {
                     lastRootNodeCount = newCount
+                    lastFullTreeRevision = newFullTreeRevision
+                    lastTreeRevision = newTreeRevision
+                    lastGitStatusRevision = newGitStatusRevision
                     let expandedPaths = store.expandedPaths
                     outlineView.reloadData()
                     restoreExpansionState(expandedPaths, in: outlineView)
+                    didUpdateOutline = true
                 } else {
-                    refreshLoadedNodes(in: outlineView)
+                    if newTreeRevision != lastTreeRevision {
+                        lastTreeRevision = newTreeRevision
+                        refreshLoadedNodes(in: outlineView)
+                        didUpdateOutline = true
+                    }
+                    if newGitStatusRevision != lastGitStatusRevision {
+                        lastGitStatusRevision = newGitStatusRevision
+                        reloadVisibleRows(in: outlineView)
+                        didUpdateOutline = true
+                    }
                 }
-                applyStoredSelection(in: outlineView, fallbackToFirstVisible: false, scroll: false)
+                if didUpdateOutline {
+                    applyStoredSelection(in: outlineView, fallbackToFirstVisible: false, scroll: false)
+                }
             }
         }
 
         private func restoreExpansionState(_ expandedPaths: Set<String>, in outlineView: NSOutlineView) {
-            for row in 0..<outlineView.numberOfRows {
-                guard let node = outlineView.item(atRow: row) as? FileExplorerNode else { continue }
+            var row = 0
+            while row < outlineView.numberOfRows {
+                guard let node = outlineView.item(atRow: row) as? FileExplorerNode else {
+                    row += 1
+                    continue
+                }
                 if expandedPaths.contains(node.path) && outlineView.isExpandable(node) {
                     outlineView.expandItem(node)
                 }
+                row += 1
             }
         }
 
         private func refreshLoadedNodes(in outlineView: NSOutlineView) {
-            for row in 0..<outlineView.numberOfRows {
-                guard let node = outlineView.item(atRow: row) as? FileExplorerNode else { continue }
+            var row = 0
+            while row < outlineView.numberOfRows {
+                guard let node = outlineView.item(atRow: row) as? FileExplorerNode else {
+                    row += 1
+                    continue
+                }
                 if node.isDirectory {
                     let isCurrentlyExpanded = outlineView.isItemExpanded(node)
                     let shouldBeExpanded = store.expandedPaths.contains(node.path)
@@ -220,8 +251,17 @@ struct FileExplorerPanelView: NSViewRepresentable {
                         }
                     }
                 }
+                row += 1
             }
         }
+        private func reloadVisibleRows(in outlineView: NSOutlineView) {
+            guard outlineView.numberOfRows > 0, outlineView.numberOfColumns > 0 else { return }
+            outlineView.reloadData(
+                forRowIndexes: IndexSet(integersIn: 0..<outlineView.numberOfRows),
+                columnIndexes: IndexSet(integersIn: 0..<outlineView.numberOfColumns)
+            )
+        }
+
 
         // MARK: - NSOutlineViewDataSource
 

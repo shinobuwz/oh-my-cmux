@@ -2386,6 +2386,7 @@ struct ContentView: View {
     }
 
     private func syncFileExplorerDirectory() {
+        fileExplorerStore.setMonitoringEnabled(shouldMonitorFileExplorerStore)
         guard let selectedId = tabManager.selectedTabId,
               let tab = tabManager.tabs.first(where: { $0.id == selectedId }) else {
             // No selection means we have no local cwd to scope by; clear so the
@@ -2455,6 +2456,13 @@ struct ContentView: View {
 
     private var shouldSyncFileExplorerStore: Bool {
         FileExplorerRootSyncPolicy.shouldSyncFileExplorerStore(
+            isRightSidebarVisible: fileExplorerState.isVisible,
+            mode: fileExplorerState.mode
+        )
+    }
+
+    private var shouldMonitorFileExplorerStore: Bool {
+        FileExplorerRootSyncPolicy.shouldMonitorFileExplorerStore(
             isRightSidebarVisible: fileExplorerState.isVisible,
             mode: fileExplorerState.mode
         )
