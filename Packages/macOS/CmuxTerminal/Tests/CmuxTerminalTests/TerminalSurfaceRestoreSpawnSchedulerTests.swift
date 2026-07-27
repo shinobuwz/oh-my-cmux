@@ -117,7 +117,7 @@ import CmuxTerminalCore
         #expect(surface.runtimeSurfacePointer == nil)
     }
 
-    @Test func restorePacedTerminalSurfaceWaitsForClaudeShimBeforeEnteringSpawnQueue() async throws {
+    @Test func restorePacedTerminalSurfaceDoesNotWaitForClaudeShim() async throws {
         _ = try #require(Bundle.main.resourceURL)
         let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         let paneHost = FakeTerminalSurfacePaneHost(surfaceView: nativeView)
@@ -136,17 +136,15 @@ import CmuxTerminalCore
             paneHost: paneHost,
             runtimeFilesystem: runtimeFilesystem
         )
-        surface.scheduleHeadlessRuntimeStartIfNeeded(reason: "test-shim-gate")
-        defer { surface.closeHeadlessStartupWindowIfNeeded() }
 
         surface.createSurface(for: nativeView)
         await shimInstaller.waitForInstallStart()
 
-        #expect(scheduler.scheduledSurfaceIds.isEmpty)
+        #expect(scheduler.scheduledSurfaceIds == [surface.id])
         #expect(surface.debugRuntimeSurfaceCreateAttemptCountForTesting() == 0)
 
         await shimInstaller.complete()
-        await waitForSpawnCount(1, spawned: { scheduler.scheduledSurfaceIds.count })
+        await Task.yield()
 
         #expect(scheduler.scheduledSurfaceIds == [surface.id])
         #expect(surface.debugRuntimeSurfaceCreateAttemptCountForTesting() == 0)
@@ -189,6 +187,35 @@ import CmuxTerminalCore
         #expect(surface.runtimeSurfacePointer == nil)
     }
 
+    @Test func debugFailureOnceUsesSharedFailureAndRetryPath() {
+        let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let paneHost = FakeTerminalSurfacePaneHost(surfaceView: nativeView)
+        let scheduler = RecordingRestoreSpawnScheduler()
+        let surface = makeSurface(
+            runtimeSpawnPolicy: .immediate,
+            scheduler: scheduler,
+            nativeView: nativeView,
+            paneHost: paneHost
+        )
+        surface.claudeCommandShimInstallCompleted = true
+        TerminalSurface.resetDebugRuntimeSurfaceCreationFailure()
+        defer { TerminalSurface.resetDebugRuntimeSurfaceCreationFailure() }
+
+        TerminalSurface.debugFailNextRuntimeSurfaceCreation()
+        #expect(TerminalSurface.debugRuntimeSurfaceCreationFailureIsArmed())
+
+        surface.createSurface(for: nativeView)
+
+        #expect(surface.runtimeCreationState.phase == .failed)
+        #expect(!TerminalSurface.debugRuntimeSurfaceCreationFailureIsArmed())
+        #expect(surface.debugRuntimeSurfaceCreateAttemptCountForTesting() == 1)
+
+        surface.retryRuntimeSurfaceCreation()
+
+        #expect(surface.runtimeCreationState.phase == .failed)
+        #expect(surface.debugRuntimeSurfaceCreateAttemptCountForTesting() == 2)
+    }
+
     @Test func inputDemandForRestorePacedTerminalBypassesPendingRestoreQueue() {
         let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         let paneHost = FakeTerminalSurfacePaneHost(surfaceView: nativeView)
@@ -208,51 +235,6 @@ import CmuxTerminalCore
         #expect(surface.runtimeSurfacePointer == nil)
     }
 
-    @Test func postShimScheduledRestoreDoesNotTailAppendReadyViewToRestoreQueue() {
-        let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        let paneHost = FakeTerminalSurfacePaneHost(surfaceView: nativeView)
-        let scheduler = RecordingRestoreSpawnScheduler()
-        let surface = makeSurface(
-            scheduler: scheduler,
-            nativeView: nativeView,
-            paneHost: paneHost
-        )
-        surface.scheduleHeadlessRuntimeStartIfNeeded(reason: "test-ready-slot")
-        defer { surface.closeHeadlessStartupWindowIfNeeded() }
-        surface.attachedView = nativeView
-        surface.claudeCommandShimInstallCompleted = true
-
-        #expect(nativeView.window != nil)
-        surface.resumeSurfaceCreationAfterClaudeCommandShimReady(
-            view: nativeView,
-            source: .scheduledRestore
-        )
-
-        #expect(scheduler.scheduledSurfaceIds.isEmpty)
-        #expect(surface.debugRuntimeSurfaceCreateAttemptCountForTesting() == 1)
-        #expect(surface.runtimeSurfacePointer == nil)
-    }
-
-    @Test func postShimScheduledRestoreWithoutReadyViewDoesNotTailAppendToRestoreQueue() {
-        let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        let paneHost = FakeTerminalSurfacePaneHost(surfaceView: nativeView)
-        let scheduler = RecordingRestoreSpawnScheduler()
-        let surface = makeSurface(
-            scheduler: scheduler,
-            nativeView: nativeView,
-            paneHost: paneHost
-        )
-        surface.claudeCommandShimInstallCompleted = true
-
-        surface.resumeSurfaceCreationAfterClaudeCommandShimReady(
-            view: nativeView,
-            source: .scheduledRestore
-        )
-
-        #expect(scheduler.scheduledSurfaceIds.isEmpty)
-        #expect(surface.debugRuntimeSurfaceCreateAttemptCountForTesting() == 0)
-        #expect(surface.runtimeSurfacePointer == nil)
-    }
 
     @Test func queuedSocketInputPromotesBackgroundStartToInputDemand() {
         let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -295,49 +277,6 @@ import CmuxTerminalCore
         #expect(surface.runtimeSurfacePointer == nil)
     }
 
-    @Test func inputDemandPromotesInFlightClaudeShimCreationSource() {
-        let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        let paneHost = FakeTerminalSurfacePaneHost(surfaceView: nativeView)
-        let scheduler = RecordingRestoreSpawnScheduler()
-        let surface = makeSurface(
-            scheduler: scheduler,
-            nativeView: nativeView,
-            paneHost: paneHost
-        )
-        surface.claudeCommandShimInstallTask = Task { nil }
-        defer {
-            surface.claudeCommandShimInstallTask?.cancel()
-            surface.claudeCommandShimInstallTask = nil
-            surface.claudeCommandShimPendingCreationSource = nil
-        }
-
-        _ = surface.claudeCommandShimStateForSurface(view: nativeView, source: .scheduledRestore)
-        _ = surface.claudeCommandShimStateForSurface(view: nativeView, source: .inputDemand)
-
-        #expect(surface.claudeCommandShimPendingCreationSource == .inputDemand)
-    }
-
-    @Test func inputDemandShimFallbackStartsHeadlessWithoutRestoreQueue() {
-        let nativeView = FakeTerminalSurfaceNativeView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        let paneHost = FakeTerminalSurfacePaneHost(surfaceView: nativeView)
-        let scheduler = RecordingRestoreSpawnScheduler()
-        let surface = makeSurface(
-            scheduler: scheduler,
-            nativeView: nativeView,
-            paneHost: paneHost
-        )
-        surface.claudeCommandShimInstallCompleted = true
-        defer { surface.closeHeadlessStartupWindowIfNeeded() }
-
-        surface.resumeSurfaceCreationAfterClaudeCommandShimReady(
-            view: nil,
-            source: .inputDemand
-        )
-
-        #expect(scheduler.scheduledSurfaceIds.isEmpty)
-        #expect(surface.debugRuntimeSurfaceCreateAttemptCountForTesting() == 1)
-        #expect(surface.runtimeSurfacePointer == nil)
-    }
 
     private func waitForSpawnCount(_ count: Int, spawned: () -> Int) async {
         for _ in 0..<100 {

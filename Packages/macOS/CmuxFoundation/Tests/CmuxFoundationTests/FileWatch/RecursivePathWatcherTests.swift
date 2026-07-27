@@ -36,7 +36,15 @@ private actor GateClock: FileWatchClock {
     }
 }
 
-@Suite struct RecursivePathWatcherTests {
+@Suite(.serialized) struct RecursivePathWatcherTests {
+    /// Creates a fresh temporary directory for a real-watcher test. Removing it
+    /// during cleanup is the caller's `defer` responsibility.
+    private static func makeTemporaryDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-file-watch-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
     @Test func emptyPathsFailsInitialization() {
         let watcher = RecursivePathWatcher(paths: [])
         #expect(watcher == nil)
@@ -110,5 +118,61 @@ private actor GateClock: FileWatchClock {
         let next: RecursivePathWatcherEvent? = await iterator.next()
         #expect(next == nil)
         #expect(await clock.sleeperCount == 0)
+    }
+
+    /// A real watcher increments the process-global active-stream count exactly
+    /// once on successful creation and decrements it again on `stop()`. The count
+    /// is process-wide, so this suite is `.serialized` and every assertion is
+    /// made against a per-test baseline rather than an absolute value.
+    @Test func realWatcherIncrementsThenDecrementsGlobalCount() async {
+        let directory = Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let baseline = RecursivePathWatcher.activeStreamCount
+        let watcher = RecursivePathWatcher(paths: [directory.path])
+        #expect(watcher != nil)
+        #expect(RecursivePathWatcher.activeStreamCount == baseline + 1)
+
+        await watcher?.stop()
+        #expect(RecursivePathWatcher.activeStreamCount == baseline)
+    }
+
+    /// `stop()` is idempotent: a second stop and the deinit-time stop must not
+    /// underflow the non-underflowing counter, so the count returns to baseline
+    /// exactly once and stays there.
+    @Test func repeatedStopIsIdempotentForGlobalCount() async {
+        let directory = Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let baseline = RecursivePathWatcher.activeStreamCount
+        guard let watcher = RecursivePathWatcher(paths: [directory.path]) else {
+            Issue.record("watcher should initialize for a real directory")
+            return
+        }
+        #expect(RecursivePathWatcher.activeStreamCount == baseline + 1)
+
+        await watcher.stop()
+        #expect(RecursivePathWatcher.activeStreamCount == baseline)
+        await watcher.stop()
+        #expect(RecursivePathWatcher.activeStreamCount == baseline)
+    }
+
+    /// Releasing the last strong reference without an explicit `stop()` runs
+    /// `deinit`, which tears the `FSEventStream` down and restores the count —
+    /// the cleanup path under test here.
+    @Test func deinitDecrementsGlobalCountWhenWatcherIsReleased() async {
+        let directory = Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let baseline = RecursivePathWatcher.activeStreamCount
+        var watcher: RecursivePathWatcher? = RecursivePathWatcher(paths: [directory.path])
+        #expect(watcher != nil)
+        #expect(RecursivePathWatcher.activeStreamCount == baseline + 1)
+
+        // Dropping the last strong reference forces deinit synchronously:
+        // `eventStream.stop()` syncs onto the FSEvents queue, so the count is
+        // restored by the time the assignment returns.
+        watcher = nil
+        #expect(RecursivePathWatcher.activeStreamCount == baseline)
     }
 }

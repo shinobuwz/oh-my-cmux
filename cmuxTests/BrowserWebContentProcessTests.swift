@@ -249,7 +249,8 @@ struct BrowserWebContentProcessTests {
 
         #expect(!(panel.webView === oldWebView))
         #expect(panel.webViewInstanceID != oldInstanceID)
-        #expect(panel.hasRecoverableWebContentTermination)
+        // First non-empty termination auto-recovers (replace + reload); no recovery overlay.
+        #expect(!panel.hasRecoverableWebContentTermination)
         #expect(panel.webView.navigationDelegate != nil)
         #expect(panel.webView.uiDelegate != nil)
         #expect(panel.webView.superview == nil)
@@ -306,13 +307,35 @@ struct BrowserWebContentProcessTests {
         )
         defer { panel.close() }
 
+        // First non-empty termination auto-recovers (replace + reload); no overlay.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(!panel.hasRecoverableWebContentTermination)
+
+        // A second consecutive termination before commit opens the render circuit.
         panel.debugSimulateWebContentProcessTermination()
         #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+        let circuitOpenWebView = panel.webView
 
         panel.reload()
 
+        // Retry closes the circuit, builds a fresh WKWebView, and resets the
+        // consecutive-termination budget for the new recovery attempt.
         #expect(!panel.hasRecoverableWebContentTermination)
         #expect(panel.shouldRenderWebView)
+        #expect(!(panel.webView === circuitOpenWebView))
+        let retriedWebView = panel.webView
+
+        // The first pre-commit termination after a manual retry auto-recovers.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(!panel.hasRecoverableWebContentTermination)
+        #expect(panel.shouldRenderWebView)
+        #expect(!(panel.webView === retriedWebView))
+
+        // Only the second consecutive termination reopens the circuit.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
     }
 
     @Test
@@ -323,6 +346,8 @@ struct BrowserWebContentProcessTests {
         )
         defer { panel.close() }
 
+        // Two consecutive terminations open the render circuit.
+        panel.debugSimulateWebContentProcessTermination()
         panel.debugSimulateWebContentProcessTermination()
         #expect(panel.hasRecoverableWebContentTermination)
 
@@ -347,6 +372,8 @@ struct BrowserWebContentProcessTests {
         )
         defer { panel.close() }
 
+        // Two consecutive terminations open the render circuit.
+        panel.debugSimulateWebContentProcessTermination()
         panel.debugSimulateWebContentProcessTermination()
         #expect(panel.hasRecoverableWebContentTermination)
 
@@ -365,6 +392,132 @@ struct BrowserWebContentProcessTests {
 
         #expect(!panel.shouldRenderWebView)
         #expect(!panel.hasRecoverableWebContentTermination)
+    }
+
+    @Test
+    func secondConsecutiveTerminationOpensCircuitWithoutReplacement() {
+        let panel = BrowserPanel(
+            workspaceId: UUID(),
+            initialURL: recoveryURL
+        )
+        defer { panel.close() }
+
+        let originalWebView = panel.webView
+        let originalInstanceID = panel.webViewInstanceID
+
+        // First non-empty termination: auto-replace + reload, no recovery overlay.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(!(panel.webView === originalWebView))
+        #expect(panel.webViewInstanceID != originalInstanceID)
+        #expect(!panel.hasRecoverableWebContentTermination)
+        #expect(panel.shouldRenderWebView)
+
+        let replacedWebView = panel.webView
+        let replacedInstanceID = panel.webViewInstanceID
+
+        // Second consecutive termination before commit opens the render circuit
+        // without constructing another replacement: identity is preserved.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(panel.webView === replacedWebView)
+        #expect(panel.webViewInstanceID == replacedInstanceID)
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+
+        // A repeated (third) termination callback is a no-op while the circuit is open.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(panel.webView === replacedWebView)
+        #expect(panel.webViewInstanceID == replacedInstanceID)
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+    }
+
+    @Test
+    func nonblankCommitResetsConsecutiveTerminationBudget() {
+        let panel = BrowserPanel(
+            workspaceId: UUID(),
+            initialURL: recoveryURL
+        )
+        defer { panel.close() }
+
+        // First termination: auto-replace + reload (budget 0 -> 1).
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(!panel.hasRecoverableWebContentTermination)
+        #expect(panel.shouldRenderWebView)
+        let firstReplacedWebView = panel.webView
+
+        // Simulate WebKit firing didCommit for a non-about:blank main frame on
+        // the current webview. This resets the consecutive-termination budget to 0.
+        panel.navigationDelegate?.didCommit?(panel.webView, nil)
+
+        // After the reset, the next termination behaves as a fresh "first":
+        // auto-replace + reload, no circuit. Identity changes again.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(!(panel.webView === firstReplacedWebView))
+        #expect(!panel.hasRecoverableWebContentTermination)
+        #expect(panel.shouldRenderWebView)
+
+        let secondReplacedWebView = panel.webView
+
+        // Without an intervening commit, the next consecutive termination opens
+        // the circuit without replacing. Identity is preserved.
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(panel.webView === secondReplacedWebView)
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+    }
+
+    @Test
+    func ordinaryNavigationRefusesWhileTerminationCircuitIsOpen() {
+        let panel = BrowserPanel(
+            workspaceId: UUID(),
+            initialURL: recoveryURL
+        )
+        defer { panel.close() }
+
+        // Open the render circuit with two consecutive terminations.
+        panel.debugSimulateWebContentProcessTermination()
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+
+        let circuitOpenWebView = panel.webView
+        let otherURL = URL(string: "https://example.org/circuit-refusal")!
+
+        // Ordinary typed navigation must refuse while the circuit is open: no
+        // re-render, no identity change, circuit stays open for explicit Retry.
+        _ = panel.navigate(to: otherURL)
+
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+        #expect(panel.webView === circuitOpenWebView)
+    }
+
+    @Test
+    func pendingRemoteNavigationRefusesWhileTerminationCircuitIsOpen() {
+        let panel = BrowserPanel(
+            workspaceId: UUID(),
+            initialURL: recoveryURL,
+            isRemoteWorkspace: true,
+            remoteWebsiteDataStoreIdentifier: UUID()
+        )
+        defer { panel.close() }
+
+        // Open the render circuit with two consecutive terminations.
+        panel.debugSimulateWebContentProcessTermination()
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+
+        let circuitOpenWebView = panel.webView
+        let otherURL = URL(string: "https://example.org/remote-circuit-refusal")!
+
+        // Pending-remote navigation must refuse while the circuit is open: the
+        // pending-remote queue is not re-armed over a non-rendering pane.
+        _ = panel.navigate(to: otherURL)
+
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+        #expect(panel.webView === circuitOpenWebView)
     }
 
     @Test

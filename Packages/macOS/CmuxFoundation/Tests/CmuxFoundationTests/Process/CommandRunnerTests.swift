@@ -54,6 +54,32 @@ import Testing
         #expect(output == nil)
     }
 
+    @Test func fastCompletionCanRaceDeadlineArmingWithoutCrashing() async {
+        let results = await withTaskGroup(
+            of: CommandResult.self,
+            returning: [CommandResult].self
+        ) { group in
+            for _ in 0..<64 {
+                group.addTask {
+                    await runner.run(
+                        directory: tempDir,
+                        executable: "true",
+                        arguments: [],
+                        timeout: 10
+                    )
+                }
+            }
+            var results: [CommandResult] = []
+            for await result in group {
+                results.append(result)
+            }
+            return results
+        }
+
+        #expect(results.count == 64)
+        #expect(results.allSatisfy { $0.exitStatus == 0 && !$0.timedOut && $0.executionError == nil })
+    }
+
     @Test func timesOutLongRunningCommand() async throws {
         // `sleep 10` never exits within the 0.3s deadline, so the only way `run` can
         // return is by firing its timeout. Racing against a generous guard deadline
@@ -119,6 +145,29 @@ import Testing
         )
         #expect(result.timedOut == true)
         #expect(result.exitStatus == nil)
+    }
+
+    @Test func parentTaskCancellationReturnsPromptly() async throws {
+        let commandTask = Task {
+            await runner.run(
+                directory: tempDir,
+                executable: "sleep",
+                arguments: ["10"],
+                timeout: 30
+            )
+        }
+
+        // Let Process.run complete so this exercises mid-run cancellation,
+        // not only the pre-launch short-circuit.
+        try await Task.sleep(for: .milliseconds(100))
+        commandTask.cancel()
+
+        let result = try await expectCompletes(within: 2) {
+            await commandTask.value
+        }
+        #expect(result.timedOut == false)
+        #expect(result.exitStatus == nil)
+        #expect(result.executionError == "cancelled")
     }
 
     @Test func handlesLargeOutputWithoutDeadlock() async {

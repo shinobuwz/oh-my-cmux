@@ -194,9 +194,14 @@ private func rendererReleaseWasOccluded() -> Bool
             callbackContext.toOpaque(),
             GHOSTTY_RENDERER_EVENT_UPDATE_FRAME_END
         )
+        #expect(scheduler.scheduledSurfaceIDs.isEmpty)
         terminalRendererEventCallback(
             callbackContext.toOpaque(),
-            GHOSTTY_RENDERER_EVENT_UPDATE_FRAME_END
+            GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED
+        )
+        terminalRendererEventCallback(
+            callbackContext.toOpaque(),
+            GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED
         )
 
         #expect(surface.isRendererPresented)
@@ -230,7 +235,7 @@ private func rendererReleaseWasOccluded() -> Bool
         surface.setRendererPortalVisible(true, attachmentReady: true)
         terminalRendererEventCallback(
             callbackContext.toOpaque(),
-            GHOSTTY_RENDERER_EVENT_UPDATE_FRAME_END
+            GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED
         )
 
         #expect(!surface.isRendererPresented)
@@ -240,7 +245,7 @@ private func rendererReleaseWasOccluded() -> Bool
         setRendererRealizedResult(true)
         terminalRendererEventCallback(
             callbackContext.toOpaque(),
-            GHOSTTY_RENDERER_EVENT_UPDATE_FRAME_END
+            GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED
         )
 
         #expect(surface.isRendererPresented)
@@ -306,7 +311,7 @@ private func rendererReleaseWasOccluded() -> Bool
         surface.setRendererPortalVisible(true, attachmentReady: true)
         terminalRendererEventCallback(
             callbackContext.toOpaque(),
-            GHOSTTY_RENDERER_EVENT_UPDATE_FRAME_END
+            GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED
         )
 
         #expect(scheduler.scheduledSurfaceIDs == [surface.id])

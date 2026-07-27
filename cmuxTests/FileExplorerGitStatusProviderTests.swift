@@ -1,3 +1,4 @@
+import CmuxFoundation
 import Foundation
 import Testing
 
@@ -10,7 +11,7 @@ import Testing
 @Suite(.serialized)
 struct FileExplorerGitStatusProviderTests {
     @Test
-    func statusQueryDoesNotRefreshGitIndex() throws {
+    func statusQueryDoesNotRefreshGitIndex() async throws {
         let repoURL = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: repoURL) }
 
@@ -28,14 +29,14 @@ struct FileExplorerGitStatusProviderTests {
             ofItemAtPath: trackedURL.path
         )
 
-        _ = GitStatusProvider().fetchStatus(directory: repoURL.path)
+        _ = await GitStatusProvider().fetchStatus(directory: repoURL.path)
 
         let indexAfterStatus = try Data(contentsOf: indexURL)
         #expect(indexAfterStatus == indexBeforeStatus)
     }
 
     @Test
-    func statusQueryPreservesQuotedAndEscapedFilenames() throws {
+    func statusQueryPreservesQuotedAndEscapedFilenames() async throws {
         let repoURL = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: repoURL) }
         try Self.initializeRepo(at: repoURL)
@@ -46,15 +47,15 @@ struct FileExplorerGitStatusProviderTests {
         try "one\n".write(to: trackedURL, atomically: true, encoding: .utf8)
         try Self.runGit(["add", "."], in: repoURL)
         try Self.runGit(["commit", "-m", "initial"], in: repoURL)
-        try "two\n".write(to: trackedURL, atomically: true, encoding: .utf8)
+        try "two changed\n".write(to: trackedURL, atomically: true, encoding: .utf8)
 
-        let status = GitStatusProvider().fetchStatus(directory: nestedURL.path)
+        let status = await GitStatusProvider().fetchStatus(directory: nestedURL.path)
 
         #expect(status[trackedURL.path] == .some(.modified))
     }
 
     @Test
-    func statusQueryExcludesSiblingPathPrefixes() throws {
+    func statusQueryExcludesSiblingPathPrefixes() async throws {
         let repoURL = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: repoURL) }
         try Self.initializeRepo(at: repoURL)
@@ -70,10 +71,10 @@ struct FileExplorerGitStatusProviderTests {
         try "one\n".write(to: siblingFileURL, atomically: true, encoding: .utf8)
         try Self.runGit(["add", "."], in: repoURL)
         try Self.runGit(["commit", "-m", "initial"], in: repoURL)
-        try "two\n".write(to: visibleURL, atomically: true, encoding: .utf8)
-        try "two\n".write(to: siblingFileURL, atomically: true, encoding: .utf8)
+        try "two changed\n".write(to: visibleURL, atomically: true, encoding: .utf8)
+        try "two changed\n".write(to: siblingFileURL, atomically: true, encoding: .utf8)
 
-        let status = GitStatusProvider().fetchStatus(directory: explorerRootURL.path)
+        let status = await GitStatusProvider().fetchStatus(directory: explorerRootURL.path)
 
         #expect(status[visibleURL.path] == .some(.modified))
         #expect(status[siblingFileURL.path] == nil)
@@ -81,43 +82,40 @@ struct FileExplorerGitStatusProviderTests {
     }
 
     @Test
-    func statusQueryMapsTypeChangedAndUnmergedEntries() throws {
+    func statusQueryRunsNonLockingGitAndParsesTypeChangedAndUnmergedEntries() async throws {
+        // Asserts the read-only path invokes `/usr/bin/env GIT_OPTIONAL_LOCKS=0 git …`
+        // (non-locking) for both rev-parse and status, and parses type-change and
+        // unmerged entries to `.modified`.
         let repoURL = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: repoURL) }
 
-        let fakeGitURL = try Self.writeExecutableScript(
-            #"""
-            #!/bin/sh
-            if [ "${CMUX_TEST_GIT_ENV:-}" != "expected" ]; then
-                exit 3
-            fi
-            if [ "${GIT_OPTIONAL_LOCKS:-}" != "0" ]; then
-                exit 4
-            fi
-            case "$1 $2" in
-            "rev-parse --show-toplevel")
-                printf '%s\n' "$CMUX_TEST_REPO_ROOT"
-                ;;
-            "status --porcelain=v1")
-                printf ' T type-change.txt\0UU conflicted.txt\0'
-                ;;
-            *)
-                exit 2
-                ;;
-            esac
-            """#,
-            named: "fake-git",
-            in: repoURL
-        )
-        var environment = ProcessInfo.processInfo.environment
-        environment["CMUX_TEST_GIT_ENV"] = "expected"
-        environment["CMUX_TEST_REPO_ROOT"] = repoURL.path
+        let runner = RecordingStatusCommandRunner(results: [
+            CommandResult(
+                stdout: repoURL.path,
+                stderr: "",
+                exitStatus: 0,
+                timedOut: false,
+                executionError: nil
+            ),
+            CommandResult(
+                stdout: " T type-change.txt\0UU conflicted.txt\0",
+                stderr: "",
+                exitStatus: 0,
+                timedOut: false,
+                executionError: nil
+            ),
+        ])
+        let provider = GitStatusProvider(commandRunner: runner)
 
-        let status = GitStatusProvider(
-            gitExecutableURL: fakeGitURL,
-            environment: environment
-        ).fetchStatus(directory: repoURL.path)
+        let status = await provider.fetchStatus(directory: repoURL.path)
 
+        let calls = await runner.calls
+        #expect(calls.count == 2)
+        #expect(calls[0].executable == "/usr/bin/env")
+        #expect(calls[0].arguments == ["GIT_OPTIONAL_LOCKS=0", "git", "rev-parse", "--show-toplevel"])
+        #expect(calls[1].executable == "/usr/bin/env")
+        #expect(calls[1].arguments == ["GIT_OPTIONAL_LOCKS=0", "git", "status", "--porcelain=v1", "-z"])
+        #expect(calls.allSatisfy { $0.timeout != nil })
         #expect(
             status[repoURL.appendingPathComponent("type-change.txt").path] == .some(.modified)
         )
@@ -127,29 +125,24 @@ struct FileExplorerGitStatusProviderTests {
     }
 
     @Test
-    func sshStatusQueryUsesInjectedProcessEnvironment() throws {
+    func sshStatusQueryDispatchesThroughInjectedCommandRunner() async throws {
+        // The ssh status path runs `ssh` via the injected CommandRunning seam
+        // with a finite deadline and parses the framed output.
         let repoURL = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: repoURL) }
 
-        let fakeSSHURL = try Self.writeExecutableScript(
-            #"""
-            #!/bin/sh
-            if [ "${CMUX_TEST_SSH_ENV:-}" != "expected" ]; then
-                exit 3
-            fi
-            printf '%s\n---GIT_STATUS---\n M remote.txt\0' "$CMUX_TEST_REPO_ROOT"
-            """#,
-            named: "fake-ssh",
-            in: repoURL
-        )
-        var environment = ProcessInfo.processInfo.environment
-        environment["CMUX_TEST_REPO_ROOT"] = repoURL.path
-        environment["CMUX_TEST_SSH_ENV"] = "expected"
+        let runner = RecordingStatusCommandRunner(results: [
+            CommandResult(
+                stdout: "\(repoURL.path)\n---GIT_STATUS---\n M remote.txt\0",
+                stderr: "",
+                exitStatus: 0,
+                timedOut: false,
+                executionError: nil
+            ),
+        ])
+        let provider = GitStatusProvider(commandRunner: runner)
 
-        let status = GitStatusProvider(
-            sshExecutableURL: fakeSSHURL,
-            environment: environment
-        ).fetchStatusSSH(
+        let status = await provider.fetchStatusSSH(
             directory: repoURL.path,
             destination: "example.invalid",
             port: nil,
@@ -157,13 +150,18 @@ struct FileExplorerGitStatusProviderTests {
             sshOptions: []
         )
 
+        let calls = await runner.calls
+        #expect(calls.count == 1)
+        #expect(calls[0].executable == "ssh")
+        #expect(calls[0].timeout != nil)
+        #expect(calls[0].arguments.contains("example.invalid"))
         #expect(
             status[repoURL.appendingPathComponent("remote.txt").path] == .some(.modified)
         )
     }
 
     @Test
-    func sshStatusQueryOverridesHostConfiguredRemoteCommand() throws {
+    func sshStatusQueryOverridesHostConfiguredRemoteCommand() async throws {
         // The remote git status runs as an ssh command-line command, which
         // OpenSSH refuses while a host-configured RemoteCommand is in effect
         // (issue #7246) — the argv must carry `-o RemoteCommand=none` before
@@ -171,24 +169,18 @@ struct FileExplorerGitStatusProviderTests {
         let repoURL = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: repoURL) }
 
-        let argvLog = repoURL.appendingPathComponent("ssh-argv.txt")
-        let fakeSSHURL = try Self.writeExecutableScript(
-            #"""
-            #!/bin/sh
-            for arg in "$@"; do printf '%s\n' "$arg"; done > "$CMUX_TEST_SSH_ARGV_LOG"
-            printf '%s\n---GIT_STATUS---\n M remote.txt\0' "$CMUX_TEST_REPO_ROOT"
-            """#,
-            named: "fake-ssh",
-            in: repoURL
-        )
-        var environment = ProcessInfo.processInfo.environment
-        environment["CMUX_TEST_REPO_ROOT"] = repoURL.path
-        environment["CMUX_TEST_SSH_ARGV_LOG"] = argvLog.path
+        let runner = RecordingStatusCommandRunner(results: [
+            CommandResult(
+                stdout: "\(repoURL.path)\n---GIT_STATUS---\n M remote.txt\0",
+                stderr: "",
+                exitStatus: 0,
+                timedOut: false,
+                executionError: nil
+            ),
+        ])
+        let provider = GitStatusProvider(commandRunner: runner)
 
-        let status = GitStatusProvider(
-            sshExecutableURL: fakeSSHURL,
-            environment: environment
-        ).fetchStatusSSH(
+        _ = await provider.fetchStatusSSH(
             directory: repoURL.path,
             destination: "example.invalid",
             port: nil,
@@ -196,12 +188,8 @@ struct FileExplorerGitStatusProviderTests {
             sshOptions: []
         )
 
-        #expect(
-            status[repoURL.appendingPathComponent("remote.txt").path] == .some(.modified)
-        )
-        let argv = try String(contentsOf: argvLog, encoding: .utf8)
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
+        let calls = await runner.calls
+        let argv = try #require(calls.first?.arguments)
         let overrideIndex = argv.indices.dropLast().first {
             argv[$0] == "-o" && argv[$0 + 1] == "RemoteCommand=none"
         }
@@ -217,16 +205,7 @@ struct FileExplorerGitStatusProviderTests {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("cmux-file-explorer-git-status-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-        return rootURL
-    }
-
-    private static func writeExecutableScript(
-        _ contents: String, named name: String, in directory: URL
-    ) throws -> URL {
-        let scriptURL = directory.appendingPathComponent(name)
-        try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
-        return scriptURL
+        return rootURL.resolvingSymlinksInPath()
     }
 
     private static func initializeRepo(at repoURL: URL) throws {
@@ -248,5 +227,44 @@ struct FileExplorerGitStatusProviderTests {
         process.waitUntilExit()
 
         try #require(process.terminationStatus == 0, "git \(arguments.joined(separator: " ")) failed")
+    }
+}
+
+/// A `CommandRunning` fake that returns canned `CommandResult`s in call order
+/// and records every invocation, so the provider's executable/argument/timeout
+/// shape can be asserted without spawning a real process.
+private actor RecordingStatusCommandRunner: CommandRunning {
+    struct Call: Sendable, Equatable {
+        let directory: String
+        let executable: String
+        let arguments: [String]
+        let timeout: TimeInterval?
+    }
+
+    private let results: [CommandResult]
+    private var nextIndex = 0
+    private(set) var calls: [Call] = []
+
+    init(results: [CommandResult]) {
+        self.results = results
+    }
+
+    func run(
+        directory: String,
+        executable: String,
+        arguments: [String],
+        timeout: TimeInterval?
+    ) async -> CommandResult {
+        calls.append(Call(
+            directory: directory,
+            executable: executable,
+            arguments: arguments,
+            timeout: timeout
+        ))
+        let result = nextIndex < results.count
+            ? results[nextIndex]
+            : CommandResult(stdout: "", stderr: "", exitStatus: 0, timedOut: false, executionError: nil)
+        nextIndex += 1
+        return result
     }
 }

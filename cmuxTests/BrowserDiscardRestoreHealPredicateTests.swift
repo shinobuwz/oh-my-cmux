@@ -249,6 +249,32 @@ struct BrowserDiscardRestorePolicyCancelTests {
         #expect(panel.webViewLifecycleTopPayload()["state"] as? String != "discarded")
     }
 
+    @Test func terminationCircuitRefusesDiscardRestoreAndReactivation() {
+        let panel = BrowserPanel(
+            workspaceId: UUID(),
+            initialURL: URL(string: "data:text/html,cmux-circuit-discard")!
+        )
+        defer { panel.close() }
+
+        panel.debugSimulateWebContentProcessTermination()
+        panel.debugSimulateWebContentProcessTermination()
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+        let circuitWebView = panel.webView
+
+        panel.hiddenWebViewDiscardManager.markDiscarded(
+            reason: "test.circuit",
+            now: Date(timeIntervalSince1970: 100)
+        )
+
+        #expect(!panel.restoreDiscardedWebViewIfNeeded(reason: "test.circuit.restore"))
+        #expect(!panel.reactivateDiscardedWebViewWithoutNavigation(reason: "test.circuit.reactivate"))
+        #expect(panel.hiddenWebViewDiscardManager.isDiscardedForMemory)
+        #expect(panel.hasRecoverableWebContentTermination)
+        #expect(!panel.shouldRenderWebView)
+        #expect(panel.webView === circuitWebView)
+    }
+
     @Test func cancelledExternalAppPromptDoesNotReportTerminalRestore() throws {
         let url = try #require(URL(string: "cmux-issue-7504-external://open"))
         let panel = BrowserPanel(
