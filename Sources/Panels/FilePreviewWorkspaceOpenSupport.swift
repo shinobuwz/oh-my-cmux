@@ -39,6 +39,22 @@ extension Workspace {
                         targetIndex: nextIndex
                     )
                 }
+            } else if HtmlPreviewSettings.resolvedMode() == .browser,
+                      (pathExtension == "html" || pathExtension == "htm") {
+                let fileURL = URL(fileURLWithPath: filePath)
+                if reuseExisting {
+                    panel = openOrFocusBrowserSurface(
+                        inPane: paneId,
+                        fileURL: fileURL,
+                        focus: shouldFocusNewTabs
+                    )
+                } else {
+                    panel = newBrowserSurface(
+                        inPane: paneId,
+                        url: fileURL,
+                        focus: shouldFocusNewTabs
+                    )
+                }
             } else if reuseExisting {
                 panel = openOrFocusFilePreviewSurface(
                     inPane: paneId,

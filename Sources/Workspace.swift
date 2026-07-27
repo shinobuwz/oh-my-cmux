@@ -8317,6 +8317,28 @@ final class Workspace: Identifiable, ObservableObject {
 
         return newFilePreviewSurface(inPane: paneId, filePath: filePath, focus: focus)
     }
+    @discardableResult
+    func openOrFocusBrowserSurface(
+        inPane targetPaneId: PaneID,
+        fileURL: URL,
+        focus: Bool = true
+    ) -> BrowserPanel? {
+        let canonical = (fileURL.path as NSString).resolvingSymlinksInPath
+        for (existingId, panel) in panels {
+            guard let browserPanel = panel as? BrowserPanel else { continue }
+            guard let url = browserPanel.currentURL, url.isFileURL,
+                  (url.path as NSString).resolvingSymlinksInPath == canonical else {
+                continue
+            }
+            // 仅复用当前 pane 内的同文件 browser surface，不跨 pane 抢焦点。
+            guard paneId(forPanelId: existingId) == targetPaneId else { continue }
+            if focus {
+                focusPanel(existingId)
+            }
+            return browserPanel
+        }
+        return newBrowserSurface(inPane: targetPaneId, url: fileURL, focus: focus)
+    }
 
     @discardableResult
     func openOrFocusFilePreviewSplit(

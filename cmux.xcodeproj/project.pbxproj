@@ -964,6 +964,7 @@ C0DE71B10000000000000001 /* AppDelegate+AgentChatNotifications.swift in Sources 
 		B1F0C0040000000000000001 /* HostedInspectorDockControlScriptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F0C0040000000000000002 /* HostedInspectorDockControlScriptTests.swift */; };
 		CD0CFE6200000000CD0CFE62 /* HostSettingsActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD0CFE6300000000CD0CFE63 /* HostSettingsActions.swift */; };
 		809100000000000000000001 /* HostSettingsShortcutNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 809100000000000000000002 /* HostSettingsShortcutNotificationTests.swift */; };
+		DEADBEEF0000000000000002 /* HtmlPreviewSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEADBEEF0000000000000001 /* HtmlPreviewSettings.swift */; };
 		F1C1AA21B7E84D10A1C10001 /* InactivePaneFirstClickFocusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1C1AA20B7E84D10A1C10001 /* InactivePaneFirstClickFocusTests.swift */; };
 		DA7A10CA710E000000000004 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = DA7A10CA710E000000000002 /* InfoPlist.xcstrings */; };
 		C0DE71450000000000000003 /* InMemoryWorkspaceCreateIdempotencyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE71450000000000000004 /* InMemoryWorkspaceCreateIdempotencyStore.swift */; };
@@ -3112,6 +3113,7 @@ C0DE71B10000000000000002 /* AppDelegate+AgentChatNotifications.swift */ = {isa =
 		B1F0C0040000000000000002 /* HostedInspectorDockControlScriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedInspectorDockControlScriptTests.swift; sourceTree = "<group>"; };
 		CD0CFE6300000000CD0CFE63 /* HostSettingsActions.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HostSettingsActions.swift; sourceTree = "<group>"; };
 		809100000000000000000002 /* HostSettingsShortcutNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSettingsShortcutNotificationTests.swift; sourceTree = "<group>"; };
+		DEADBEEF0000000000000001 /* HtmlPreviewSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HtmlPreviewSettings.swift; sourceTree = "<group>"; };
 		F1C1AA20B7E84D10A1C10001 /* InactivePaneFirstClickFocusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InactivePaneFirstClickFocusTests.swift; sourceTree = "<group>"; };
 		DA7A10CA710E000000000002 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
 		C0DE71450000000000000004 /* InMemoryWorkspaceCreateIdempotencyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InMemoryWorkspaceCreateIdempotencyStore.swift; sourceTree = "<group>"; };
@@ -5055,6 +5057,7 @@ C0DE71B10000000000000002 /* AppDelegate+AgentChatNotifications.swift */ = {isa =
 				85911000000000000000000A /* TerminalLinkOpenRequest.swift */,
 				85911000000000000000000C /* Workspace+TerminalLinkOpening.swift */,
 				C40410010000000000000020 /* FileExplorerDoubleClickActionSettings.swift */,
+				DEADBEEF0000000000000001 /* HtmlPreviewSettings.swift */,
 				C0DEF828300000000000002 /* GhosttyTerminalImmediateHostedStateAction.swift */,
 				A5001015 /* GhosttyTerminalView.swift */,
 				816400000000000000000002 /* GhosttyScrollView.swift */,
@@ -7543,6 +7546,7 @@ C0DE71B10000000000000002 /* AppDelegate+AgentChatNotifications.swift */ = {isa =
 				CD0CFE6000000000CD0CFE60 /* HostAccountFlow.swift in Sources */,
 				B1F0C0030000000000000001 /* HostedInspectorDockControlScript.swift in Sources */,
 				CD0CFE6200000000CD0CFE62 /* HostSettingsActions.swift in Sources */,
+				DEADBEEF0000000000000002 /* HtmlPreviewSettings.swift in Sources */,
 				C0DEA7720000000000000001 /* InternalFlagsWindow.swift in Sources */,
 				4D8B37E0E11A29997632765F /* InternalTabDragConfiguration.swift in Sources */,
 				E7B200000000000000000001 /* IrohTransportDebugMenuButtons.swift in Sources */,

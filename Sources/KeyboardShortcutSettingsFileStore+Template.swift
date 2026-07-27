@@ -236,6 +236,11 @@ extension CmuxSettingsFileStore {
                 ],
             ],
             [
+                "files": [
+                    "htmlPreview": HtmlPreviewSettings.defaultMode.rawValue,
+                ],
+            ],
+            [
                 "diffViewer": [
                     "defaultLayout": "unified",
                 ],

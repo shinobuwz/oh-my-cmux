@@ -30,6 +30,21 @@ extension CmuxSettingsFileStore {
             logInvalid("fileExplorer.doubleClickAction", sourcePath: sourcePath)
         }
     }
+    func parseFilesSection(
+        _ section: [String: Any],
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        if let raw = jsonString(section["htmlPreview"]) {
+            if let mode = HtmlPreviewMode(rawValue: raw) {
+                snapshot.managedUserDefaults[HtmlPreviewSettings.key] = .string(mode.rawValue)
+            } else {
+                logInvalid("files.htmlPreview", sourcePath: sourcePath)
+            }
+        } else if section.keys.contains("htmlPreview") {
+            logInvalid("files.htmlPreview", sourcePath: sourcePath)
+        }
+    }
 
     func parseSidebarWorkspaceTodosBeta(
         _ beta: [String: Any],
