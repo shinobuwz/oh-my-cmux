@@ -715,6 +715,32 @@ fn syncDrawTimer(self: *Thread) void {
     );
 }
 
+/// Drain every queued mailbox message through `context.handleMailboxMessage`,
+/// then emit one `mailbox_drained` activity pulse if (and only if) at least one
+/// message was processed. The generic context seam mirrors
+/// `applyRendererVisibilityTransition`/`renderAfterMailboxDrain` so the drain
+/// contract is directly testable without constructing a platform renderer.
+///
+/// Emission is tied to a non-empty drain round: a spurious wake that finds an
+/// empty mailbox does not pulse, and on iOS the external `render_now` drainer
+/// (invoked every display-link tick) stays quiet unless it actually flushed
+/// work. Both the renderer-thread wake and the external drainer pass through
+/// here, so one emit covers every distinct drain entry point. This is
+/// independent of UPDATE_FRAME_*/DRAW_FRAME_* activity, which `drainMailbox`
+/// does not touch.
+fn drainMailboxMessages(
+    context: anytype,
+    visibility: *VisibilityDrainState,
+    external_drain: bool,
+) !void {
+    var drained_any = false;
+    while (context.mailbox.pop()) |message| {
+        drained_any = true;
+        log.debug("mailbox message={}", .{message});
+        try context.handleMailboxMessage(message, visibility, external_drain);
+    }
+}
+
 /// Drain the mailbox.
 fn drainMailbox(self: *Thread) !MailboxDrainResult {
     // There's probably a more elegant way to do this...
@@ -730,158 +756,7 @@ fn drainMailbox(self: *Thread) !MailboxDrainResult {
     const external_drain = self.externalDrainActive();
     var visibility = VisibilityDrainState.init(self.flags.visible);
 
-    while (self.mailbox.pop()) |message| {
-        log.debug("mailbox message={}", .{message});
-        switch (message) {
-            .crash => @panic("crash request, crashing intentionally"),
-
-            .visible => |v| visible: {
-                // If our state didn't change we do nothing.
-                if (!visibility.apply(v)) break :visible;
-
-                // Set our visible state
-                self.flags.visible = v;
-
-                // Visibility affects our QoS class
-                self.setQosClass();
-
-                // Note that we're explicitly today not stopping any
-                // cursor timers, draw timers, etc. These things have very
-                // little resource cost and properly maintaining their active
-                // state across different transitions is going to be bug-prone,
-                // so its easier to just let them keep firing and have them
-                // check the visible state themselves to control their behavior.
-            },
-
-            .focus => |v| focus: {
-                // If our state didn't change we do nothing.
-                if (self.flags.focused == v) break :focus;
-
-                // Set our state
-                self.flags.focused = v;
-
-                // Focus affects our QoS class
-                self.setQosClass();
-
-                // Set it on the renderer
-                try self.renderer.setFocus(v);
-
-                if (external_drain) {
-                    if (v) self.resetExternalCursorBlink();
-                    break :focus;
-                }
-
-                // We always resync our draw timer (may disable it)
-                self.syncDrawTimer();
-
-                if (!v) {
-                    // If we're not focused, then we stop the cursor blink
-                    if (self.cursor_c.state() == .active and
-                        self.cursor_c_cancel.state() == .dead)
-                    {
-                        self.cursor_h.cancel(
-                            &self.loop,
-                            &self.cursor_c,
-                            &self.cursor_c_cancel,
-                            void,
-                            null,
-                            cursorCancelCallback,
-                        );
-                    }
-                } else {
-                    // If we're focused, we immediately show the cursor again
-                    // and then restart the timer.
-                    if (self.cursor_c.state() != .active) {
-                        self.flags.cursor_blink_visible = true;
-                        self.cursor_h.run(
-                            &self.loop,
-                            &self.cursor_c,
-                            cursorBlinkInterval(),
-                            Thread,
-                            self,
-                            cursorTimerCallback,
-                        );
-                    }
-                }
-            },
-
-            .reset_cursor_blink => {
-                self.flags.cursor_blink_visible = true;
-                if (external_drain) {
-                    self.resetExternalCursorBlink();
-                    continue;
-                }
-                if (self.cursor_c.state() == .active) {
-                    self.cursor_h.reset(
-                        &self.loop,
-                        &self.cursor_c,
-                        &self.cursor_c_cancel,
-                        cursorBlinkInterval(),
-                        Thread,
-                        self,
-                        cursorTimerCallback,
-                    );
-                }
-            },
-
-            .font_grid => |grid| {
-                self.renderer.setFontGrid(grid.grid);
-                grid.set.deref(grid.old_key);
-            },
-
-            .resize => |v| self.renderer.setScreenSize(v),
-
-            .change_config => |config| {
-                defer config.alloc.destroy(config.thread);
-                defer config.alloc.destroy(config.impl);
-                try self.changeConfig(config.thread);
-                try self.renderer.changeConfig(config.impl);
-
-                // Stop and start the draw timer to capture the new
-                // hasAnimations value.
-                if (!external_drain) self.syncDrawTimer();
-            },
-
-            .search_viewport_matches => |v| {
-                // Note we don't free the new value because we expect our
-                // allocators to match.
-                if (self.renderer.search_matches) |*m| m.arena.deinit();
-                self.renderer.search_matches = v;
-                self.renderer.search_matches_dirty = true;
-            },
-
-            .search_selected_match => |v| {
-                // Note we don't free the new value because we expect our
-                // allocators to match.
-                if (self.renderer.search_selected_match) |*m| m.arena.deinit();
-                self.renderer.search_selected_match = v;
-                self.renderer.search_matches_dirty = true;
-            },
-
-            .inspector => |v| {
-                self.flags.has_inspector = v;
-            },
-
-            .macos_display_id => |v| {
-                if (@hasDecl(rendererpkg.Renderer, "setMacOSDisplayID")) {
-                    try self.renderer.setMacOSDisplayID(v);
-                }
-            },
-
-            // cmux fork: release/recreate the renderer's GPU resources (swap
-            // chain / IOSurface) without freeing the surface. Safe here because
-            // this runs on the renderer thread (so it never races a draw), the
-            // surface is occluded when this is sent (macOS `drawFrame` early-
-            // returns on `!flags.visible`), and both calls take `draw_mutex`.
-            .display_realized => |v| {
-                if (v) {
-                    try self.renderer.displayRealized();
-                } else {
-                    self.renderer.displayUnrealized();
-                }
-            },
-        }
-    }
+    try drainMailboxMessages(self, &visibility, external_drain);
 
     if (external_drain) return .{};
 
@@ -894,6 +769,167 @@ fn drainMailbox(self: *Thread) !MailboxDrainResult {
         &self.visibility_regain,
         visibility.rendererTransition(),
     );
+}
+
+/// Apply one mailbox message. Split out of `drainMailbox` so the drain loop
+/// (and its `mailbox_drained` pulse) can be exercised generically. The old
+/// `continue` that skipped to the next loop iteration is an early `return`
+/// from this per-message handler — byte-identical control flow.
+fn handleMailboxMessage(
+    self: *Thread,
+    message: rendererpkg.Message,
+    visibility: *VisibilityDrainState,
+    external_drain: bool,
+) !void {
+    switch (message) {
+        .crash => @panic("crash request, crashing intentionally"),
+
+        .visible => |v| visible: {
+            // If our state didn't change we do nothing.
+            if (!visibility.apply(v)) break :visible;
+
+            // Set our visible state
+            self.flags.visible = v;
+
+            // Visibility affects our QoS class
+            self.setQosClass();
+
+            // Note that we're explicitly today not stopping any
+            // cursor timers, draw timers, etc. These things have very
+            // little resource cost and properly maintaining their active
+            // state across different transitions is going to be bug-prone,
+            // so its easier to just let them keep firing and have them
+            // check the visible state themselves to control their behavior.
+        },
+
+        .focus => |v| focus: {
+            // If our state didn't change we do nothing.
+            if (self.flags.focused == v) break :focus;
+
+            // Set our state
+            self.flags.focused = v;
+
+            // Focus affects our QoS class
+            self.setQosClass();
+
+            // Set it on the renderer
+            try self.renderer.setFocus(v);
+
+            if (external_drain) {
+                if (v) self.resetExternalCursorBlink();
+                break :focus;
+            }
+
+            // We always resync our draw timer (may disable it)
+            self.syncDrawTimer();
+
+            if (!v) {
+                // If we're not focused, then we stop the cursor blink
+                if (self.cursor_c.state() == .active and
+                    self.cursor_c_cancel.state() == .dead)
+                {
+                    self.cursor_h.cancel(
+                        &self.loop,
+                        &self.cursor_c,
+                        &self.cursor_c_cancel,
+                        void,
+                        null,
+                        cursorCancelCallback,
+                    );
+                }
+            } else {
+                // If we're focused, we immediately show the cursor again
+                // and then restart the timer.
+                if (self.cursor_c.state() != .active) {
+                    self.flags.cursor_blink_visible = true;
+                    self.cursor_h.run(
+                        &self.loop,
+                        &self.cursor_c,
+                        cursorBlinkInterval(),
+                        Thread,
+                        self,
+                        cursorTimerCallback,
+                    );
+                }
+            }
+        },
+
+        .reset_cursor_blink => {
+            self.flags.cursor_blink_visible = true;
+            if (external_drain) {
+                self.resetExternalCursorBlink();
+                return;
+            }
+            if (self.cursor_c.state() == .active) {
+                self.cursor_h.reset(
+                    &self.loop,
+                    &self.cursor_c,
+                    &self.cursor_c_cancel,
+                    cursorBlinkInterval(),
+                    Thread,
+                    self,
+                    cursorTimerCallback,
+                );
+            }
+        },
+
+        .font_grid => |grid| {
+            self.renderer.setFontGrid(grid.grid);
+            grid.set.deref(grid.old_key);
+        },
+
+        .resize => |v| self.renderer.setScreenSize(v),
+
+        .change_config => |config| {
+            defer config.alloc.destroy(config.thread);
+            defer config.alloc.destroy(config.impl);
+            try self.changeConfig(config.thread);
+            try self.renderer.changeConfig(config.impl);
+
+            // Stop and start the draw timer to capture the new
+            // hasAnimations value.
+            if (!external_drain) self.syncDrawTimer();
+        },
+
+        .search_viewport_matches => |v| {
+            // Note we don't free the new value because we expect our
+            // allocators to match.
+            if (self.renderer.search_matches) |*m| m.arena.deinit();
+            self.renderer.search_matches = v;
+            self.renderer.search_matches_dirty = true;
+        },
+
+        .search_selected_match => |v| {
+            // Note we don't free the new value because we expect our
+            // allocators to match.
+            if (self.renderer.search_selected_match) |*m| m.arena.deinit();
+            self.renderer.search_selected_match = v;
+            self.renderer.search_matches_dirty = true;
+        },
+
+        .inspector => |v| {
+            self.flags.has_inspector = v;
+        },
+
+        .macos_display_id => |v| {
+            if (@hasDecl(rendererpkg.Renderer, "setMacOSDisplayID")) {
+                try self.renderer.setMacOSDisplayID(v);
+            }
+        },
+
+        // cmux fork: release/recreate the renderer's GPU resources (swap
+        // chain / IOSurface) without freeing the surface. Safe here because
+        // this runs on the renderer thread (so it never races a draw), the
+        // surface is occluded when this is sent (macOS `drawFrame` early-
+        // returns on `!flags.visible`), and both calls take `draw_mutex`.
+        .display_realized => |v| {
+            if (v) {
+                try self.renderer.displayRealized();
+            } else {
+                self.renderer.displayUnrealized();
+            }
+        },
+    }
 }
 
 fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
@@ -1440,7 +1476,7 @@ test "visibility regain renders exactly once per wake" {
     };
 
     const EventCounts = struct {
-        values: [4]usize = @splat(0),
+        values: [@typeInfo(instrumentationpkg.Event).@"enum".fields.len]usize = @splat(0),
 
         fn callback(
             userdata: ?*anyopaque,
@@ -1750,6 +1786,108 @@ test "visibility regain renders exactly once per wake" {
     try std.testing.expectEqual(1, deferred.draws);
     try std.testing.expectEqual(1, deferred_events.count(.draw_frame_begin));
     try std.testing.expectEqual(1, deferred_events.count(.draw_frame_end));
+}
+
+test "renderer mailbox drain pulses mailbox_drained exactly once per round" {
+    // Red-capable: before this change `mailbox_drained` did not exist, so an
+    // EventCounts array sized to the enum could not index it and the drain
+    // seam did not emit it. This drives the real production drain loop
+    // (`drainMailboxMessages`) over a real renderer Mailbox and asserts the
+    // standalone pulse fires exactly once per non-empty drain round,
+    // independent of any UPDATE_FRAME_*/DRAW_FRAME_* activity.
+
+    const EventCounts = struct {
+        values: [@typeInfo(instrumentationpkg.Event).@"enum".fields.len]usize = @splat(0),
+
+        fn callback(
+            userdata: ?*anyopaque,
+            event: instrumentationpkg.Event,
+        ) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.values[@intCast(@intFromEnum(event))] += 1;
+        }
+
+        fn count(self: *const @This(), event: instrumentationpkg.Event) usize {
+            return self.values[@intCast(@intFromEnum(event))];
+        }
+    };
+
+    // A drain context owning a real renderer Mailbox (the same BlockingQueue
+    // production uses) and counting the messages its handler consumed. It
+    // emits no frame events, proving the pulse is decoupled from rendering.
+    const DrainCtx = struct {
+        mailbox: Mailbox = .{},
+        instrumentation: instrumentationpkg.Instrumentation = .{},
+        handled: usize = 0,
+
+        fn handleMailboxMessage(
+            self: *@This(),
+            message: rendererpkg.Message,
+            visibility: *VisibilityDrainState,
+            external_drain: bool,
+        ) !void {
+            _ = visibility;
+            _ = external_drain;
+            switch (message) {
+                .inspector => { self.handled += 1; },
+                .reset_cursor_blink => { self.handled += 1; },
+                else => @panic("test pushed an unexpected message kind"),
+            }
+        }
+    };
+
+    // Real drain over a non-empty mailbox: exactly one pulse, regardless of how
+    // many messages were drained (a per-message emission would produce N).
+    var counts: EventCounts = .{};
+    var ctx: DrainCtx = .{
+        .instrumentation = .{
+            .callback = EventCounts.callback,
+            .userdata = &counts,
+        },
+    };
+    _ = ctx.mailbox.push(.{ .inspector = true }, .{ .instant = {} });
+    _ = ctx.mailbox.push(.{ .reset_cursor_blink = {} }, .{ .instant = {} });
+    _ = ctx.mailbox.push(.{ .inspector = false }, .{ .instant = {} });
+
+    var visibility = VisibilityDrainState.init(true);
+    try drainMailboxMessages(&ctx, &visibility, false);
+
+    try std.testing.expectEqual(3, ctx.handled);
+    try std.testing.expectEqual(1, counts.count(.mailbox_drained));
+    try std.testing.expectEqual(0, counts.count(.update_frame_begin));
+    try std.testing.expectEqual(0, counts.count(.update_frame_end));
+    try std.testing.expectEqual(0, counts.count(.draw_frame_begin));
+    try std.testing.expectEqual(0, counts.count(.draw_frame_end));
+
+    // A round over an already-empty mailbox must NOT pulse: the event signals
+    // an actual drain, not a spurious wake.
+    try drainMailboxMessages(&ctx, &visibility, false);
+    try std.testing.expectEqual(1, counts.count(.mailbox_drained));
+
+    // A fresh non-empty round pulses exactly once more.
+    _ = ctx.mailbox.push(.{ .inspector = true }, .{ .instant = {} });
+    try drainMailboxMessages(&ctx, &visibility, false);
+    try std.testing.expectEqual(2, counts.count(.mailbox_drained));
+    try std.testing.expectEqual(0, counts.count(.update_frame_begin));
+
+    // The external drain path (distinct on iOS; parameterized here through the
+    // same seam production routes the external `render_now` drainer through
+    // before its early visibility-return) emits the same single pulse per
+    // non-empty round.
+    var external_counts: EventCounts = .{};
+    var external_ctx: DrainCtx = .{
+        .instrumentation = .{
+            .callback = EventCounts.callback,
+            .userdata = &external_counts,
+        },
+    };
+    _ = external_ctx.mailbox.push(.{ .inspector = true }, .{ .instant = {} });
+    var external_visibility = VisibilityDrainState.init(true);
+    try drainMailboxMessages(&external_ctx, &external_visibility, true);
+
+    try std.testing.expectEqual(1, external_ctx.handled);
+    try std.testing.expectEqual(1, external_counts.count(.mailbox_drained));
+    try std.testing.expectEqual(0, external_counts.count(.update_frame_begin));
 }
 
 /// Notify the apprt when the active selection changes. The activity epoch is

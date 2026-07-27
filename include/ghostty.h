@@ -485,6 +485,14 @@ typedef enum {
   GHOSTTY_RENDERER_EVENT_UPDATE_FRAME_END = 1,
   GHOSTTY_RENDERER_EVENT_DRAW_FRAME_BEGIN = 2,
   GHOSTTY_RENDERER_EVENT_DRAW_FRAME_END = 3,
+
+  // Standalone (not a begin/end pair): emitted exactly once per renderer
+  // mailbox drain round that processed at least one queued message, after the
+  // mailbox is empty. Fires on the renderer thread (or, on iOS, the external
+  // render serial queue that owns `render_now`). Independent of
+  // UPDATE_FRAME_*/DRAW_FRAME_* activity, so a drain that mutates no visible
+  // state still pulses it.
+  GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED = 4,
 } ghostty_renderer_event_e;
 
 // The userdata is ghostty_surface_config_s.userdata. The callback must be

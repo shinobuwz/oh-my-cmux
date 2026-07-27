@@ -5,6 +5,11 @@ pub const Event = enum(c_int) {
     update_frame_end = 1,
     draw_frame_begin = 2,
     draw_frame_end = 3,
+
+    /// Emitted exactly once per renderer mailbox drain round that processed at
+    /// least one queued message, after the mailbox is empty. Standalone (not a
+    /// begin/end pair) and independent of UPDATE_FRAME_*/DRAW_FRAME_* activity.
+    mailbox_drained = 4,
 };
 
 pub const Callback = *const fn (
