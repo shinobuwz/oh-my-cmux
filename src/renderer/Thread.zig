@@ -739,6 +739,7 @@ fn drainMailboxMessages(
         log.debug("mailbox message={}", .{message});
         try context.handleMailboxMessage(message, visibility, external_drain);
     }
+    if (drained_any) context.instrumentation.emit(.mailbox_drained);
 }
 
 /// Drain the mailbox.
