@@ -13,13 +13,15 @@ Run the setup script to initialize submodules, build GhosttyKit, and install the
 After making code changes, always run the reload script with a tag to build the Debug app:
 
 ```bash
-./scripts/reload.sh --tag fix-zsh-autosuggestions
+./scripts/reload.sh --tag dev
 ```
+
+**Use the fixed tag `dev` for all routine dev builds.** A fixed tag means a fixed bundle id (`com.cmuxterm.app.debug.dev`), a fixed Application Support container, and a fixed socket path — so the dev app keeps its login state, browser profile/cookies, workspace layout, and UserDefaults between builds instead of starting from a clean slate every time. Only use a descriptive tag (e.g. `--tag fix-blur-effect`) when you need to run a second Debug app side-by-side with the main `dev` build to compare behavior; clean it up (quit the app + remove its `/tmp` socket and DerivedData) as soon as you're done.
 
 By default, `reload.sh` builds but does **not** launch the app. The script prints the `.app` path so the user can cmd-click to open it. After a successful build, it always terminates any running app with the same tag (so cmd-clicking launches the freshly-built binary instead of foregrounding the stale instance). Pass `--launch` to open the app automatically after the build:
 
 ```bash
-./scripts/reload.sh --tag fix-zsh-autosuggestions --launch
+./scripts/reload.sh --tag dev --launch
 ```
 
 `reload.sh` prints an `App path:` line with the absolute path to the built `.app`. Use that path to build a cmd-clickable `file://` URL. Steps:
@@ -66,13 +68,13 @@ The helper refuses to run without `CMUX_TAG`, targets `/tmp/cmux-debug-<tag>.soc
 After making code changes, always use `reload.sh --tag` to build. **Never run bare `xcodebuild` or `open` an untagged `cmux DEV.app`.** Untagged builds share the default debug socket and bundle ID with other agents, causing conflicts and stealing focus.
 
 ```bash
-./scripts/reload.sh --tag <your-branch-slug>
+./scripts/reload.sh --tag dev
 ```
 
 If you only need to verify the build compiles (no launch), use a tagged derivedDataPath:
 
 ```bash
-xcodebuild -project cmux.xcodeproj -scheme cmux -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/cmux-<your-tag> build
+xcodebuild -project cmux.xcodeproj -scheme cmux -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/cmux-dev build
 ```
 
 When rebuilding GhosttyKit.xcframework, always use Release optimizations:
@@ -112,15 +114,13 @@ cd cmuxd && zig build -Doptimize=ReleaseFast
 ./scripts/reload2.sh --tag <tag>
 ```
 
-For parallel/isolated builds (e.g., testing a feature alongside the main app), use `--tag` with a short descriptive name:
+For parallel/isolated builds (e.g., comparing two builds side-by-side, or testing a feature without disturbing the main `dev` app's state), use a short descriptive tag:
 
 ```bash
 ./scripts/reload.sh --tag fix-blur-effect
 ```
 
-This creates an isolated app with its own name, bundle ID, socket, and derived data path so it runs side-by-side with the main app. Important: use a non-`/tmp` derived data path if you need xcframework resolution (the script handles this automatically).
-
-Before launching a new tagged run, clean up any older tags you started in this session (quit old tagged app + remove its `/tmp` socket/derived data).
+This creates an isolated app with its own name, bundle ID, socket, and derived data path so it runs side-by-side with the main `dev` app. Important: use a non-`/tmp` derived data path if you need xcframework resolution (the script handles this automatically). Each extra tag accumulates ~5–9 GB of DerivedData and spins up an isolated Application Support container (empty login/cookies/state), so prefer the fixed `dev` tag for routine work and clean up parallel tags as soon as the comparison is done.
 
 For iOS dev auth, `ios/scripts/reload.sh` and `scripts/mobile-dev-launch.sh` auto-sign-in from `~/.secrets/cmuxterm-dev.env`. If the phone lands on the login screen or the helper reports missing dev sign-in credentials, do not ask the user to manually authenticate every build. Tell them to run `scripts/setup-team-dev.sh` once from any cmux checkout; it prompts for and verifies their Stack login, writes `~/.secrets/cmuxterm-dev.env` with chmod 600, and future agents can auto-auth iOS DEBUG reloads. Manual fallback: create that file with `CMUX_DOGFOOD_STACK_EMAIL=...` and `CMUX_DOGFOOD_STACK_PASSWORD=...`.
 
