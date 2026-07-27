@@ -2,21 +2,15 @@ import Foundation
 
 extension TerminalSurface {
     @MainActor
-    func claudeCommandShimStateForSurface(
-        view: any TerminalSurfaceNativeViewing,
-        source: RuntimeSurfaceCreationSource
-    ) -> (isReady: Bool, shim: ClaudeCommandShim?) {
+    func claudeCommandShimForSurface() -> ClaudeCommandShim? {
         guard let wrapperURL = Bundle.main.resourceURL?.appendingPathComponent("bin/cmux-claude-wrapper") else {
             claudeCommandShimInstallCompleted = true
-            return (true, nil)
+            return nil
         }
 
         if claudeCommandShimInstallCompleted {
-            return (true, claudeCommandShim)
+            return claudeCommandShim
         }
-
-        claudeCommandShimPendingCreationSource =
-            (claudeCommandShimPendingCreationSource ?? source).promoted(with: source)
 
         if claudeCommandShimInstallTask == nil {
             let surfaceId = id
@@ -38,21 +32,19 @@ extension TerminalSurface {
             #endif
             let installTask = Task.detached(priority: .utility, operation: installOperation)
             claudeCommandShimInstallTask = installTask
-            claudeCommandShimCompletionTask = Task { @MainActor [weak self, weak view] in
+            claudeCommandShimCompletionTask = Task { @MainActor [weak self] in
                 let shim = await installTask.value
-                guard !Task.isCancelled else { return }
-                guard let self else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.claudeCommandShim = shim
                 self.claudeCommandShimInstallCompleted = true
                 self.claudeCommandShimInstallTask = nil
                 self.claudeCommandShimCompletionTask = nil
-                let source = self.claudeCommandShimPendingCreationSource ?? source
-                self.claudeCommandShimPendingCreationSource = nil
-                self.resumeSurfaceCreationAfterClaudeCommandShimReady(view: view, source: source)
             }
         }
 
-        return (false, nil)
+        // Shim installation is auxiliary. Native PTY creation must never wait
+        // for it; a completed shim is picked up by a later runtime creation.
+        return nil
     }
 
     @MainActor
@@ -61,22 +53,6 @@ extension TerminalSurface {
         claudeCommandShimCompletionTask = nil
         claudeCommandShimInstallTask?.cancel()
         claudeCommandShimInstallTask = nil
-        claudeCommandShimPendingCreationSource = nil
     }
 
-    @MainActor
-    func resumeSurfaceCreationAfterClaudeCommandShimReady(
-        view: (any TerminalSurfaceNativeViewing)?,
-        source: RuntimeSurfaceCreationSource
-    ) {
-        guard allowsRuntimeSurfaceCreation(), surface == nil else { return }
-
-        if let view, view.window != nil {
-            createSurface(for: view, source: source)
-        } else if let attachedView, attachedView.window != nil {
-            createSurface(for: attachedView, source: source)
-        } else {
-            scheduleHeadlessRuntimeStartIfNeeded(reason: "claude-shim-ready", source: source)
-        }
-    }
 }

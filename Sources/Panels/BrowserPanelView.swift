@@ -1779,21 +1779,57 @@ struct BrowserPanelView: View {
     private var webContentRecoveryOverlay: some View {
         ZStack {
             Color(nsColor: browserChromeBackgroundColor)
-                .opacity(0.92)
-            Button(action: {
-                panel.recoverTerminatedWebContent(reason: "overlayButton")
-            }) {
-                Label(
-                    String(localized: "browser.error.reload", defaultValue: "Reload"),
-                    systemImage: "arrow.clockwise"
-                )
-                .cmuxFont(size: 13, weight: .medium)
-                .padding(.horizontal, 6)
+                .opacity(0.96)
+
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(String(
+                    localized: "browser.error.webContentTermination.title",
+                    defaultValue: "Browser Page Stopped"
+                ))
+                .cmuxFont(size: 16, weight: .semibold)
+
+                Text(String(
+                    localized: "browser.error.webContentTermination.message",
+                    defaultValue: "The page process stopped repeatedly. cmux paused automatic retries to prevent a restart loop."
+                ))
+                .cmuxFont(size: 13)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+
+                Text(String(
+                    localized: "browser.error.webContentTermination.diagnostics",
+                    defaultValue: "Automatic retries are paused."
+                ))
+                .cmuxFont(size: 11, design: .monospaced)
+                .foregroundStyle(.tertiary)
+
+                Button(action: {
+                    panel.recoverTerminatedWebContent(reason: "overlayButton")
+                }) {
+                    Label(
+                        String(
+                            localized: "browser.error.webContentTermination.retry",
+                            defaultValue: "Retry"
+                        ),
+                        systemImage: "arrow.clockwise"
+                    )
+                    .cmuxFont(size: 13, weight: .medium)
+                    .padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .safeHelp(String(
+                    localized: "browser.error.webContentTermination.retry",
+                    defaultValue: "Retry"
+                ))
+                .accessibilityIdentifier("BrowserWebContentRecoveryButton")
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
-            .safeHelp(String(localized: "browser.reload", defaultValue: "Reload"))
-            .accessibilityIdentifier("BrowserWebContentRecoveryButton")
+            .padding(24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

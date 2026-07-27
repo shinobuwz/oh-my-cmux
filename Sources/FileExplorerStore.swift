@@ -728,6 +728,10 @@ final class FileExplorerStore: ObservableObject {
     /// filesystem events that the local recursive watcher cannot deliver.
     private var periodicGitRefreshTask: Task<Void, Never>?
     private var gitStatusEventRefreshTask: Task<Void, Never>?
+    /// The in-flight `git status` query. Owned and cancelled when the root,
+    /// monitoring toggle, provider, or teardown changes so a stale root never
+    /// keeps `git` alive or applies a superseded result.
+    private var gitStatusQueryTask: Task<Void, Never>?
     /// Files/Find own the directory tree. Git Diff keeps the root identity but
     /// suspends tree and Git-status work because its snapshot store owns that mode.
     private var isMonitoringEnabled = true
@@ -877,25 +881,25 @@ final class FileExplorerStore: ObservableObject {
         }
         let path = rootPath
         let gitStatusProvider = self.gitStatusProvider
+        // Cancel any in-flight query for a previous root/generation before
+        // starting the next. `fetchStatus` cooperates with cancellation and
+        // the finite CommandRunner deadline bounds any mid-run invocation.
+        gitStatusQueryTask?.cancel()
         if let sshProvider = provider as? SSHFileExplorerProvider {
             let dest = sshProvider.destination
             let port = sshProvider.port
             let identity = sshProvider.identityFile
             let opts = sshProvider.sshOptions
-            Task { @MainActor [weak self] in
-                let status = await Task.detached(priority: .utility) {
-                    gitStatusProvider.fetchStatusSSH(
-                        directory: path, destination: dest, port: port,
-                        identityFile: identity, sshOptions: opts
-                    )
-                }.value
+            gitStatusQueryTask = Task { @MainActor [weak self] in
+                let status = await gitStatusProvider.fetchStatusSSH(
+                    directory: path, destination: dest, port: port,
+                    identityFile: identity, sshOptions: opts
+                )
                 self?.applyGitStatus(status, expectedRootPath: path, expectedGeneration: generation)
             }
         } else {
-            Task { @MainActor [weak self] in
-                let status = await Task.detached(priority: .utility) {
-                    gitStatusProvider.fetchStatus(directory: path)
-                }.value
+            gitStatusQueryTask = Task { @MainActor [weak self] in
+                let status = await gitStatusProvider.fetchStatus(directory: path)
                 self?.applyGitStatus(status, expectedRootPath: path, expectedGeneration: generation)
             }
         }
@@ -1055,6 +1059,8 @@ final class FileExplorerStore: ObservableObject {
         directoryWatchCanonicalPath = nil
         gitStatusEventRefreshTask?.cancel()
         gitStatusEventRefreshTask = nil
+        gitStatusQueryTask?.cancel()
+        gitStatusQueryTask = nil
     }
 
     private func setProvider(_ newProvider: FileExplorerProvider?, reloadIfAvailable: Bool = true) {
@@ -1519,5 +1525,6 @@ final class FileExplorerStore: ObservableObject {
         cancelRemoteHomeResolution()
         directoryWatchTask?.cancel()
         periodicGitRefreshTask?.cancel()
+        gitStatusQueryTask?.cancel()
     }
 }

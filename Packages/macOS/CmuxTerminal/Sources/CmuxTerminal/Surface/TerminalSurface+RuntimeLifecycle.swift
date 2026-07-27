@@ -236,6 +236,7 @@ extension TerminalSurface {
         backgroundSurfaceStartSource = .normal
         cancelClaudeCommandShimInstallLifecycle()
         closeHeadlessStartupWindowIfNeeded()
+        runtimeCreationState.phase = .idle
 
         let callbackContext = surfaceCallbackContext
         surfaceCallbackContext = nil
@@ -306,6 +307,7 @@ extension TerminalSurface {
         backgroundSurfaceStartSource = .normal
         cancelClaudeCommandShimInstallLifecycle()
         closeHeadlessStartupWindowIfNeeded()
+        runtimeCreationState.phase = .idle
         let callbackContext = surfaceCallbackContext
         surfaceCallbackContext = nil
         let manualIOContext = manualIOContext
@@ -478,6 +480,21 @@ extension TerminalSurface {
         createSurface(for: view, source: .normal)
     }
 
+    /// Retries native runtime creation through the same input-demand path.
+    @MainActor
+    public func retryRuntimeSurfaceCreation() {
+        guard surface == nil, allowsRuntimeSurfaceCreation() else { return }
+        runtimeCreationState.phase = .creating
+        if let attachedView, attachedView.window != nil {
+            createSurface(for: attachedView, source: .inputDemand)
+        } else {
+            scheduleHeadlessRuntimeStartIfNeeded(
+                reason: "runtime-creation-retry",
+                source: .inputDemand
+            )
+        }
+    }
+
     @MainActor
     func createSurface(for view: any TerminalSurfaceNativeViewing, source: RuntimeSurfaceCreationSource) {
         guard allowsRuntimeSurfaceCreation() else {
@@ -492,15 +509,22 @@ extension TerminalSurface {
 #endif
             return
         }
-        let claudeShimState = claudeCommandShimStateForSurface(view: view, source: source)
-        guard claudeShimState.isReady else { return }
+        let claudeShim = claudeCommandShimForSurface()
         if shouldPaceRuntimeSurfaceCreation(source: source) {
             enqueueRestoredRuntimeSurfaceCreation(for: view)
             return
         }
-        let claudeShim = claudeShimState.shim
 #if DEBUG
         runtimeSurfaceCreateAttemptCountForTesting += 1
+#endif
+        runtimeCreationState.phase = .creating
+#if DEBUG
+        if Self.consumeDebugRuntimeSurfaceCreationFailure() {
+            runtimeCreationState.phase = .failed
+            logDebugEvent("ghostty.surface.create.failed reason=debugFailureOnce surface=\(id.uuidString)")
+            Self.surfaceLog("createSurface FAILED surface=\(id.uuidString): DEBUG one-shot failure")
+            return
+        }
 #endif
         #if DEBUG
         let resourcesDir = getenv("GHOSTTY_RESOURCES_DIR").flatMap { String(cString: $0) } ?? "(unset)"
@@ -511,6 +535,7 @@ extension TerminalSurface {
         #endif
 
         guard let app = engine.runtimeApp else {
+            runtimeCreationState.phase = .failed
             #if DEBUG
             logDebugEvent("ghostty.surface.create.failed reason=appNotInitialized surface=\(id.uuidString)")
             #endif
@@ -532,6 +557,7 @@ extension TerminalSurface {
         let runtimeInitialInput = runtimeSurfaceCreation.runtimeInitialInput
 
         if surface == nil {
+            runtimeCreationState.phase = .failed
             surfaceCallbackContext?.release()
             surfaceCallbackContext = nil
             manualIOContext?.release()
@@ -556,6 +582,7 @@ extension TerminalSurface {
             return
         }
         guard let createdSurface = surface else { return }
+        runtimeCreationState.phase = .ready
         if source == .scheduledRestore || source == .inputDemand {
             requiresRestoreSpawnPacing = false
         }

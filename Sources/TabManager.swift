@@ -497,6 +497,10 @@ class TabManager: ObservableObject {
     let gitWorktreeService: GitWorktreeService
     /// The fallback initializer is retained for isolated `TabManager` tests.
     let pullRequestProbeService: PullRequestProbeService
+    /// Shared filesystem-watcher registry backing the sidebar git service.
+    /// Adopted by `AppDelegate` from the initial SwiftUI TabManager so every
+    /// later window reuses it (see `WorkspaceGitMetadataWatcherRegistry`).
+    let workspaceGitMetadataWatcherRegistry: WorkspaceGitMetadataWatcherRegistry
 
     init(
         initialWorkspaceTitle: String? = nil,
@@ -513,6 +517,7 @@ class TabManager: ObservableObject {
         panelTitleUpdateCoalescer: NotificationBurstCoalescer? = nil,
         settings: any SettingsWriting = UserDefaultsSettingsClient(defaults: .standard),
         nativeSSHConnectionBroker: NativeSSHConnectionBroker = NativeSSHConnectionBroker(),
+        workspaceGitMetadataWatcherRegistry: WorkspaceGitMetadataWatcherRegistry = WorkspaceGitMetadataWatcherRegistry(),
         closeTabWarningDefaults: UserDefaults = .standard
     ) {
         self.settings = settings
@@ -558,8 +563,10 @@ class TabManager: ObservableObject {
             pullRequestProbing: pullRequestPollService,
             probeLimiter: gitProbeLimiter ?? Self.sharedWorkspaceGitProbeLimiter,
             clock: gitPollClock,
-            debugLog: sidebarGitDebugLog
+            debugLog: sidebarGitDebugLog,
+            registry: workspaceGitMetadataWatcherRegistry
         )
+        self.workspaceGitMetadataWatcherRegistry = workspaceGitMetadataWatcherRegistry
         // Wire the host seam before the first workspace is added so the
         // initial git probe scheduling (addWorkspace below) reaches the
         // services, matching the legacy in-class scheduling timing.

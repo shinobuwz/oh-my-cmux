@@ -33,6 +33,19 @@ final class FileSystemEventStream: @unchecked Sendable {
         queue.setSpecific(key: queueSpecificKey, value: 1)
         return queue
     }()
+    /// Process-global count of `FSEventStream` instances this type has started but
+    /// not yet stopped. Incremented exactly once after a successful
+    /// `FSEventStreamStart` and decremented exactly once in the idempotent
+    /// `stop()`/release path (see ``stop()``). Exposed for diagnostics through
+    /// ``RecursivePathWatcher/activeStreamCount``.
+    private static let activeStreamCounter = AtomicUInt64Counter()
+
+    /// The process-wide number of currently active, owned `FSEventStream`
+    /// instances — a best-effort diagnostic snapshot. See
+    /// ``RecursivePathWatcher/activeStreamCount``.
+    internal static var activeStreamCount: UInt64 {
+        activeStreamCounter.loadRelaxed()
+    }
 
     /// The C trampoline `FSEventStreamCreate` requires.
     ///
@@ -88,6 +101,11 @@ final class FileSystemEventStream: @unchecked Sendable {
     /// event batch, including its changed paths and structural-change flags.
     private let onEvent: @Sendable (RecursivePathWatcherEvent) -> Void
     private var stream: FSEventStreamRef?
+    // True only between a successful `FSEventStreamStart` and the matching
+    // `FSEventStreamStop`. Distinct from `stream != nil`: a stream that was
+    // created but failed to start is released without ever being counted, so the
+    // flag — not the pointer — gates the count decrement.
+    private var isStreamActive = false
 
     /// Creates and starts a stream for `paths`.
     ///
@@ -98,6 +116,10 @@ final class FileSystemEventStream: @unchecked Sendable {
     ///     filesystem event batch.
     /// - Returns: `nil` if `paths` is empty or the underlying `FSEventStream`
     ///   could not be created or started.
+    ///
+    /// On success the stream is registered with the process-global active-stream
+    /// count exactly once (see ``RecursivePathWatcher/activeStreamCount``); a
+    /// stream that fails to start is torn down without touching the count.
     init?(
         paths: [String],
         latency: TimeInterval,
@@ -134,6 +156,8 @@ final class FileSystemEventStream: @unchecked Sendable {
             stop()
             return nil
         }
+        isStreamActive = true
+        _ = Self.activeStreamCounter.incrementRelaxed()
     }
 
     /// Stops and tears down the stream. Idempotent.
@@ -143,6 +167,11 @@ final class FileSystemEventStream: @unchecked Sendable {
     /// let the instance deallocate before the stream is invalidated, leaking the
     /// `FSEventStream`. The `getSpecific` check tears down inline when already on
     /// the queue, avoiding a deadlock.
+    ///
+    /// The process-global active-stream count (see
+    /// ``RecursivePathWatcher/activeStreamCount``) is decremented exactly once —
+    /// on the transition out of the active state — so repeated `stop()` calls and
+    /// a `deinit` following an explicit stop never underflow it.
     func stop() {
         if DispatchQueue.getSpecific(key: Self.queueSpecificKey) != nil {
             stopOnQueue()
@@ -153,7 +182,14 @@ final class FileSystemEventStream: @unchecked Sendable {
 
     private func stopOnQueue() {
         guard let stream else { return }
-        FSEventStreamStop(stream)
+        if isStreamActive {
+            // A stream that was never started (creation succeeded, start failed)
+            // is released below without ever being counted or stopped, so the
+            // flag gates both the `FSEventStreamStop` and the decrement.
+            isStreamActive = false
+            FSEventStreamStop(stream)
+            _ = Self.activeStreamCounter.decrementRelaxed()
+        }
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
         self.stream = nil

@@ -16,11 +16,40 @@ parent submodule SHA.
 
 ## Current fork changes
 
-Current personal fork patch head: `6f1ab4f9c`. It adds the owned-environment
-fix described below on top of `d8994a0e5`, the merged manaflow-ai Ghostty fork
-baseline containing the indented hard-newline link and presentation-token
-changes. There is no separately published GhosttyKit archive for `6f1ab4f9c`;
-build the universal framework with `ReleaseFast` when the pinned SHA changes.
+Current personal fork patch head: `456546c2d`. It prefixes the universal
+macOS static archive for SwiftPM compatibility and includes the renderer-mailbox
+acknowledgement described below on top of `6f1ab4f9c`, the owned-environment
+fix, and `d8994a0e5`, the merged manaflow-ai Ghostty fork baseline containing
+the indented hard-newline link and presentation-token changes. There is no
+separately published GhosttyKit archive for `456546c2d`; build the universal
+framework with `ReleaseFast` when the pinned SHA changes.
+
+### Renderer mailbox drain acknowledgement
+
+- Commits:
+  - `8d3095549` (test: cover renderer mailbox drain events)
+  - `4a9070bdd` (fix: acknowledge renderer mailbox drains)
+  - `456546c2d` (fix: prefix universal static archive)
+- Files:
+  - `include/ghostty.h`
+  - `src/renderer/instrumentation.zig`
+  - `src/renderer/Thread.zig`
+  - `src/build/GhosttyLib.zig`
+- Summary:
+  - Adds the ABI-stable `GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED = 4` event.
+  - Emits one content-free pulse after each non-empty mailbox drain, including
+    externally owned drain rounds, without depending on frame production.
+  - Lets cmux retry an instant renderer-realization message only after Ghostty
+    has actually consumed mailbox work; ordinary frame-end events no longer
+    masquerade as mailbox acknowledgements.
+  - Names the universal macOS archive `libghostty-internal.a`, satisfying
+    SwiftPM's static-library naming contract without changing linked symbols.
+  - Conflict note: renderer mailbox-loop refactors must preserve exactly one
+    pulse per non-empty drain round and keep the event independent of visibility
+    and frame-update activity. Keep the C and Zig enum raw values synchronized.
+  - Conflict note: preserve the `lib` prefix if upstream changes the internal
+    archive basename; `scripts/ensure-ghosttykit.sh` refreshes this archive's
+    ranlib index after cache reuse.
 
 ### Indented hard-newline link continuations
 

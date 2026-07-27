@@ -1,30 +1,46 @@
 import CmuxFoundation
+import Darwin
 import Foundation
 
-/// Runs non-locking `git status --porcelain` and parses results into a path-to-status map.
+/// Runs non-locking `git status --porcelain` and parses results into a
+/// path-to-status map.
+///
+/// All `git` invocations go through an injected ``CommandRunning`` seam
+/// (``CmuxFoundation/CommandRunner`` by default) with a finite deadline, so a
+/// dropped/cancelled caller never leaves `git` running indefinitely. Read-only
+/// commands run as `/usr/bin/env GIT_OPTIONAL_LOCKS=0 git …` so a concurrent
+/// `git` in another surface cannot block on the index lock. The methods are
+/// `async` and cooperate with task cancellation: a cancelled task short-circuits
+/// before each subprocess invocation rather than spawning `git` regardless.
 struct GitStatusProvider: Sendable {
     private static let nonLockingGitEnvironmentKey = "GIT_OPTIONAL_LOCKS"
     private static let nonLockingGitEnvironmentValue = "0"
     private static let nonLockingRemoteGitCommand = "env \(nonLockingGitEnvironmentKey)=\(nonLockingGitEnvironmentValue) git"
 
-    private let gitExecutableURL: URL
-    private let sshExecutableURL: URL
-    private let environment: [String: String]
+    private let commandRunner: any CommandRunning
+    private let timeout: TimeInterval
 
+    /// Creates a status provider.
+    ///
+    /// - Parameters:
+    ///   - commandRunner: The ``CommandRunning`` seam that spawns `git`/`ssh`.
+    ///     Defaults to ``CmuxFoundation/CommandRunner``. Inject a fake in tests.
+    ///   - timeout: The finite deadline (seconds) for each invocation.
     init(
-        gitExecutableURL: URL = URL(fileURLWithPath: "/usr/bin/git"),
-        sshExecutableURL: URL = URL(fileURLWithPath: "/usr/bin/ssh"),
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        commandRunner: any CommandRunning = CommandRunner(),
+        timeout: TimeInterval = 30
     ) {
-        self.gitExecutableURL = gitExecutableURL
-        self.sshExecutableURL = sshExecutableURL
-        self.environment = environment
+        self.commandRunner = commandRunner
+        self.timeout = timeout
     }
 
-    func fetchStatus(directory: String) -> [String: GitFileStatus] {
-        guard let repoRoot = gitRepoRoot(for: directory) else { return [:] }
+    func fetchStatus(directory: String) async -> [String: GitFileStatus] {
+        if Task.isCancelled { return [:] }
+        guard let repoRoot = await gitRepoRoot(for: directory) else { return [:] }
+        if Task.isCancelled { return [:] }
+        let output = await runGit(in: repoRoot, arguments: ["status", "--porcelain=v1", "-z"])
         return parseGitStatus(
-            output: runGit(in: repoRoot, arguments: ["status", "--porcelain=v1", "-z"]),
+            output: output,
             repoRoot: repoRoot,
             explorerRoot: directory
         )
@@ -33,7 +49,8 @@ struct GitStatusProvider: Sendable {
     func fetchStatusSSH(
         directory: String, destination: String, port: Int?,
         identityFile: String?, sshOptions: [String]
-    ) -> [String: GitFileStatus] {
+    ) async -> [String: GitFileStatus] {
+        if Task.isCancelled { return [:] }
         let escapedDir = directory.replacingOccurrences(of: "'", with: "'\\''")
         let cmd = [
             "cd '\(escapedDir)' 2>/dev/null",
@@ -41,7 +58,7 @@ struct GitStatusProvider: Sendable {
             "echo '---GIT_STATUS---'",
             "\(Self.nonLockingRemoteGitCommand) status --porcelain=v1 -z 2>/dev/null",
         ].joined(separator: " && ")
-        guard let output = runSSH(
+        guard let output = await runSSH(
             command: cmd, destination: destination,
             port: port, identityFile: identityFile, sshOptions: sshOptions
         ) else { return [:] }
@@ -139,43 +156,66 @@ struct GitStatusProvider: Sendable {
         return result
     }
 
-    private func gitRepoRoot(for directory: String) -> String? {
-        runGit(in: directory, arguments: ["rev-parse", "--show-toplevel"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Git canonicalizes the working directory before printing the repository
+    /// root (`/var` becomes `/private/var` on macOS). Preserve the caller's path
+    /// spelling so status dictionary keys still match File Explorer URLs.
+    private static func repoRootPreservingDirectorySpelling(
+        reportedRoot: String,
+        directory: String
+    ) -> String {
+        let normalizedRoot = pathWithoutTrailingSlashes(reportedRoot)
+        let normalizedDirectory = pathWithoutTrailingSlashes(directory)
+        guard let rootPointer = Darwin.realpath(normalizedRoot, nil) else {
+            return normalizedRoot
+        }
+        defer { free(rootPointer) }
+        guard let directoryPointer = Darwin.realpath(normalizedDirectory, nil) else {
+            return normalizedRoot
+        }
+        defer { free(directoryPointer) }
+
+        let resolvedRoot = pathWithoutTrailingSlashes(String(cString: rootPointer))
+        let resolvedDirectory = pathWithoutTrailingSlashes(String(cString: directoryPointer))
+        guard path(resolvedDirectory, isContainedIn: resolvedRoot) else {
+            return normalizedRoot
+        }
+        let relativeSuffix = String(resolvedDirectory.dropFirst(resolvedRoot.count))
+        guard !relativeSuffix.isEmpty else { return normalizedDirectory }
+        guard normalizedDirectory.hasSuffix(relativeSuffix) else { return normalizedRoot }
+        return String(normalizedDirectory.dropLast(relativeSuffix.count))
     }
 
-    private func runGit(in directory: String, arguments: [String]) -> String? {
-        let process = Process()
-        process.executableURL = gitExecutableURL
-        process.arguments = arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: directory)
-        process.environment = nonLockingGitEnvironment()
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFileOrEmpty()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            return String(data: data, encoding: .utf8)
-        } catch {
+    private func gitRepoRoot(for directory: String) async -> String? {
+        guard let output = await runGit(in: directory, arguments: ["rev-parse", "--show-toplevel"]) else {
             return nil
         }
+        return Self.repoRootPreservingDirectorySpelling(
+            reportedRoot: output.trimmingCharacters(in: .whitespacesAndNewlines),
+            directory: directory
+        )
     }
 
-    private func nonLockingGitEnvironment() -> [String: String] {
-        var environment = environment
-        environment[Self.nonLockingGitEnvironmentKey] = Self.nonLockingGitEnvironmentValue
-        return environment
+    /// Runs a non-locking `git <arguments>` in `directory` and returns its
+    /// standard output only when it launched, did not time out, and exited `0`.
+    private func runGit(in directory: String, arguments: [String]) async -> String? {
+        if Task.isCancelled { return nil }
+        let result = await commandRunner.run(
+            directory: directory,
+            executable: "/usr/bin/env",
+            arguments: ["GIT_OPTIONAL_LOCKS=0", "git"] + arguments,
+            timeout: timeout
+        )
+        guard result.executionError == nil,
+              !result.timedOut,
+              result.exitStatus == 0 else { return nil }
+        return result.stdout
     }
 
     private func runSSH(
         command: String, destination: String,
         port: Int?, identityFile: String?, sshOptions: [String]
-    ) -> String? {
-        let process = Process()
-        process.executableURL = sshExecutableURL
+    ) async -> String? {
+        if Task.isCancelled { return nil }
         // The positional command conflicts with a host-configured
         // RemoteCommand unless overridden (issue #7246).
         var args: [String] = SSHHostConfiguredRemoteCommand().overrideArguments
@@ -184,19 +224,15 @@ struct GitStatusProvider: Sendable {
         for option in sshOptions { args += ["-o", option] }
         args += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T"]
         args += [destination, command]
-        process.arguments = args
-        process.environment = environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFileOrEmpty()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        let result = await commandRunner.run(
+            directory: FileManager.default.temporaryDirectory.path,
+            executable: "ssh",
+            arguments: args,
+            timeout: timeout
+        )
+        guard result.executionError == nil,
+              !result.timedOut,
+              result.exitStatus == 0 else { return nil }
+        return result.stdout
     }
 }

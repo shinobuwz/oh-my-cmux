@@ -27,4 +27,8 @@ void CmuxAtomicUInt64Initialize(CmuxAtomicUInt64Storage *storage, uint64_t initi
 uint64_t CmuxAtomicUInt64LoadRelaxed(const CmuxAtomicUInt64Storage *storage);
 uint64_t CmuxAtomicUInt64AdvanceRelaxed(CmuxAtomicUInt64Storage *storage);
 
+// Decrement clamped at zero: a counter already at zero stays at zero instead of
+// wrapping to UINT64_MAX, so idempotent teardown paths cannot underflow the count.
+uint64_t CmuxAtomicUInt64DecrementRelaxed(CmuxAtomicUInt64Storage *storage);
+
 #endif

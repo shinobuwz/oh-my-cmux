@@ -53,6 +53,31 @@ extension TerminalSurface {
     static let surfaceLogPath = "/tmp/cmux-ghostty-surface.log"
     static let sizeLogPath = "/tmp/cmux-ghostty-size.log"
 
+    /// Arms a DEBUG-only one-shot failure at the next native terminal creation.
+    @MainActor
+    public static func debugFailNextRuntimeSurfaceCreation() {
+        failNextRuntimeSurfaceCreationForDebug = true
+    }
+
+    @MainActor
+    static func consumeDebugRuntimeSurfaceCreationFailure() -> Bool {
+        guard failNextRuntimeSurfaceCreationForDebug else { return false }
+        failNextRuntimeSurfaceCreationForDebug = false
+        return true
+    }
+
+    /// Clears the DEBUG-only one-shot failure flag after a test.
+    @MainActor
+    public static func resetDebugRuntimeSurfaceCreationFailure() {
+        failNextRuntimeSurfaceCreationForDebug = false
+    }
+
+    /// Whether the DEBUG-only one-shot failure is armed.
+    @MainActor
+    public static func debugRuntimeSurfaceCreationFailureIsArmed() -> Bool {
+        failNextRuntimeSurfaceCreationForDebug
+    }
+
     /// The last applied runtime pixel size.
     public func debugCurrentPixelSize() -> (width: UInt32, height: UInt32) {
         (lastPixelWidth, lastPixelHeight)

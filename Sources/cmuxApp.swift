@@ -513,6 +513,44 @@ struct cmuxApp: App {
 
 #if DEBUG
             CommandMenu("Debug") {
+                Button(
+                    String(
+                        localized: "debug.menu.failNextTerminalCreation",
+                        defaultValue: "Fail Next New Terminal Creation"
+                    )
+                ) {
+                    TerminalSurface.debugFailNextRuntimeSurfaceCreation()
+                }
+
+                Button(
+                    String(
+                        localized: "debug.menu.reclaimHiddenTerminalRenderers",
+                        defaultValue: "Reclaim Hidden Terminal Renderers"
+                    )
+                ) {
+                    _ = RendererRealizationController.shared.reclaimForSystemMemoryPressure(now: Date())
+                }
+
+                Button(
+                    String(
+                        localized: "debug.menu.simulateBrowserWebContentTermination",
+                        defaultValue: "Simulate Focused Browser WebContent Termination"
+                    )
+                ) {
+                    activeTabManager.focusedBrowserPanel?.debugSimulateWebContentProcessTermination()
+                }
+                .disabled(activeTabManager.focusedBrowserPanel == nil)
+
+                Button(
+                    String(
+                        localized: "debug.menu.logWorkspaceGitWatcherMetrics",
+                        defaultValue: "Log Workspace Git Watcher Metrics"
+                    )
+                ) {
+                    appDelegate.logWorkspaceGitWatcherMetrics()
+                }
+
+                Divider()
                 Button("New Tab With Lorem Search Text") {
                     appDelegate.openDebugLoremTab(nil)
                 }

@@ -5,7 +5,7 @@ internal import GhosttyKit
 let terminalRendererEventCallback: @convention(c) (
     UnsafeMutableRawPointer?, ghostty_renderer_event_e
 ) -> Void = { userdata, event in
-    guard event == GHOSTTY_RENDERER_EVENT_UPDATE_FRAME_END,
+    guard event == GHOSTTY_RENDERER_EVENT_MAILBOX_DRAINED,
           let userdata else { return }
     let context = Unmanaged<GhosttySurfaceCallbackContext>
         .fromOpaque(userdata)

@@ -28,6 +28,7 @@ import Darwin
 import CmuxFoundation
 import CmuxSidebar
 import CmuxGit
+import CmuxSidebarGit
 
 private enum CmuxThemeNotifications {
     static let reloadConfig = Notification.Name("com.cmuxterm.themes.reload-config")
@@ -548,6 +549,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #else
     private(set) var pullRequestProbeService = PullRequestProbeService()
 #endif
+    /// Shared filesystem-watcher registry, adopted from the initial SwiftUI
+    /// TabManager and reused for every window created via
+    /// `createMainWindow`. So two windows observing the same git repository
+    /// share one `FSEventStream` (see `WorkspaceGitMetadataWatcherRegistry`).
+    /// `nil` until `configure(tabManager:)` adopts the initial manager's
+    /// registry; `createMainWindow` falls back to the initial-manager
+    /// adoption flow if a window is created before `configure`.
+    private(set) var workspaceGitMetadataWatcherRegistry: WorkspaceGitMetadataWatcherRegistry?
 
     /// Notification jump/open navigation, extracted into `CmuxNotifications`. `AppDelegate` is the
     /// composition root: it conforms to every seam (see `AppDelegate+NotificationNavSeams.swift`)
@@ -1920,6 +1929,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         auth: MacAuthComposition
     ) {
         self.tabManager = tabManager
+        // Adopt the initial SwiftUI TabManager's shared watcher registry so
+        // every window created later via `createMainWindow` reuses it: two
+        // windows observing the same git repository share one FSEventStream.
+        self.workspaceGitMetadataWatcherRegistry = tabManager.workspaceGitMetadataWatcherRegistry
         // SwiftUI constructs the initial TabManager before this delegate is
         // available; adopt its coordinator so every later window shares it.
         pullRequestProbeService = tabManager.pullRequestProbeService
@@ -9063,7 +9076,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             initialTerminalInput: initialTerminalInput,
             autoWelcomeIfNeeded: initialTerminalInput == nil,
             pullRequestProbeService: pullRequestProbeService,
-            nativeSSHConnectionBroker: TerminalController.shared.nativeSSHConnectionBroker
+            nativeSSHConnectionBroker: TerminalController.shared.nativeSSHConnectionBroker,
+            // Reuse the process-shared watcher registry adopted from the
+            // initial SwiftUI TabManager so windows observing the same
+            // repository share one FSEventStream.
+            workspaceGitMetadataWatcherRegistry:
+                workspaceGitMetadataWatcherRegistry
+                ?? WorkspaceGitMetadataWatcherRegistry()
         )
         tabManager.windowId = windowId
         if let sessionWindowSnapshot {
@@ -10179,6 +10198,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private let debugStressTabsPerPane = 4
     private let debugStressYieldInterval = 4
     private let debugStressSurfaceLoadTimeoutSeconds: TimeInterval = 10.0
+
+    func logWorkspaceGitWatcherMetrics() {
+        guard let registry = workspaceGitMetadataWatcherRegistry else {
+            cmuxDebugLog(
+                "workspaceGitWatcher entries=0 subscriptions=0 " +
+                "activeStreams=\(RecursivePathWatcher.activeStreamCount)"
+            )
+            return
+        }
+
+        Task {
+            let entries = await registry.entries
+            let subscriptionCount = entries.reduce(0) { $0 + $1.subscriptionCount }
+            cmuxDebugLog(
+                "workspaceGitWatcher entries=\(entries.count) " +
+                "subscriptions=\(subscriptionCount) " +
+                "activeStreams=\(RecursivePathWatcher.activeStreamCount)"
+            )
+        }
+    }
 
     @objc func openDebugScrollbackTab(_ sender: Any?) {
         guard let tabManager else { return }

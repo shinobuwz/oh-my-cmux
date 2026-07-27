@@ -68,40 +68,47 @@ struct TerminalPanelView: View {
 
     private var terminalBody: some View {
         @Bindable var textBoxState = panel.textBoxState
+        @Bindable var runtimeCreationState = panel.surface.runtimeCreationState
 
         return VStack(spacing: 0) {
             // Layering contract: terminal find UI is mounted in GhosttySurfaceScrollView (AppKit portal layer)
             // via `searchState`. Rendering `SurfaceSearchOverlay` in this SwiftUI container can hide it.
-            GhosttyTerminalView(
-                terminalSurface: panel.surface,
-                paneId: paneId,
-                isActive: isFocused,
-                isVisibleInUI: isVisibleInUI,
-                ownershipGeneration: panel.portalHostOwnershipGeneration,
-                isCurrentPaneOwner: currentPortalPaneOwner,
-                portalZPriority: portalPriority,
-                showsInactiveOverlay: isSplit && !isFocused,
-                showsUnreadNotificationRing: hasUnreadNotification && notificationPaneRingEnabled,
-                inactiveOverlayColor: appearance.unfocusedOverlayNSColor,
-                inactiveOverlayOpacity: appearance.unfocusedOverlayOpacity,
-                searchState: panel.searchState,
-                reattachToken: panel.viewReattachToken,
-                sessionContentWidthPresentation: sessionContentWidthPresentation,
-                onFocus: { _ in
-                    panel.terminalDidBecomeFocused()
-                    onFocus()
-                },
-                onTriggerFlash: onTriggerFlash
-            )
-            // Keep the NSViewRepresentable identity stable across bonsplit structural updates.
-            // This prevents transient teardown/recreate that can momentarily detach the hosted terminal view.
-            .id(panel.id)
-            .background(Color.clear)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if runtimeCreationState.phase == .failed {
+                terminalRuntimeFailureView
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(1)
+            } else {
+                GhosttyTerminalView(
+                    terminalSurface: panel.surface,
+                    paneId: paneId,
+                    isActive: isFocused,
+                    isVisibleInUI: isVisibleInUI,
+                    ownershipGeneration: panel.portalHostOwnershipGeneration,
+                    isCurrentPaneOwner: currentPortalPaneOwner,
+                    portalZPriority: portalPriority,
+                    showsInactiveOverlay: isSplit && !isFocused,
+                    showsUnreadNotificationRing: hasUnreadNotification && notificationPaneRingEnabled,
+                    inactiveOverlayColor: appearance.unfocusedOverlayNSColor,
+                    inactiveOverlayOpacity: appearance.unfocusedOverlayOpacity,
+                    searchState: panel.searchState,
+                    reattachToken: panel.viewReattachToken,
+                    sessionContentWidthPresentation: sessionContentWidthPresentation,
+                    onFocus: { _ in
+                        panel.terminalDidBecomeFocused()
+                        onFocus()
+                    },
+                    onTriggerFlash: onTriggerFlash
+                )
+                // Keep the NSViewRepresentable identity stable across bonsplit structural updates.
+                // This prevents transient teardown/recreate that can momentarily detach the hosted terminal view.
+                .id(panel.id)
+                .background(Color.clear)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 #if DEBUG
-            .reportTerminalViewportGeometryForUITest(panel: panel)
+                .reportTerminalViewportGeometryForUITest(panel: panel)
 #endif
-            .layoutPriority(1)
+                .layoutPriority(1)
+            }
 
             if panel.isTextBoxActive {
                 TextBoxInputContainer(
@@ -159,6 +166,26 @@ struct TerminalPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: .ghosttyConfigDidReload)) { _ in
             terminalFontSize = GhosttyConfig.load(globalFontMagnificationPercent: GlobalFontMagnification.storedPercent).fontSize
         }
+    }
+
+    private var terminalRuntimeFailureView: some View {
+        VStack(spacing: 12) {
+            CmuxSystemSymbolImage(magnified: "exclamationmark.triangle", pointSize: 28, weight: .regular)
+                .foregroundStyle(.secondary)
+            Text(String(localized: "terminal.runtimeCreation.failed.title", defaultValue: "Terminal couldn’t start"))
+                .cmuxFont(.headline)
+            Text(String(localized: "terminal.runtimeCreation.failed.message", defaultValue: "cmux couldn’t create the terminal runtime. Retry without closing this tab."))
+                .cmuxFont(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button(String(localized: "terminal.runtimeCreation.failed.retry", defaultValue: "Retry")) {
+                panel.surface.retryRuntimeSurfaceCreation()
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("TerminalRuntimeCreationRetryButton")
+        }
+        .padding(24)
+        .background(Color(nsColor: appearance.contentBackgroundColor))
     }
 
     private var sessionContentWidthPresentation: SessionContentWidthPresentation {

@@ -1,5 +1,4 @@
 import Foundation
-internal import CmuxFoundation
 
 // MARK: - Filesystem watchers on each tracked directory's git paths.
 
@@ -15,7 +14,7 @@ extension SidebarGitMetadataService {
 
         if workspaceGitMetadataWatcherSourceDirectoryByKey[key] == directory,
            let watchedPathsKey = workspaceGitMetadataWatcherWatchedPathsKeyByProbeKey[key],
-           workspaceGitMetadataWatchersByWatchedPathsKey[watchedPathsKey] != nil {
+           workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey[watchedPathsKey] != nil {
             if workspaceGitMetadataWatcherDescriptorRequestsByKey[key]?.directory != directory {
                 workspaceGitMetadataWatcherDescriptorRequestsByKey.removeValue(forKey: key)
             }
@@ -34,24 +33,50 @@ extension SidebarGitMetadataService {
         workspaceGitMetadataWatcherDescriptorRequestsByKey[key] = request
 
         Task { [weak self] in
-            guard let gitMetadataService = self?.gitMetadataService else { return }
+            guard let gitMetadataService = self?.gitMetadataService,
+                  let registry = self?.workspaceGitMetadataWatcherRegistry else { return }
             let watchedPaths = await gitMetadataService.watchedPaths(for: directory)
-            await MainActor.run { [weak self] in
-                self?.applyWorkspaceGitMetadataWatcherDescriptor(
+            // Subscribe via the shared registry before re-entering the main
+            // actor. The subscribe call is async (the registry is an actor);
+            // doing it here keeps the synchronous @MainActor apply path
+            // unchanged (no async ripple) while still sharing sources across
+            // every window's service. If the source factory fails (returns
+            // nil) the apply path falls back to source-directory-only
+            // tracking with no watcher, exactly as the old
+            // RecursivePathWatcher(paths:) nil branch did.
+            let subscription: WorkspaceGitMetadataWatcherSubscriptionResult?
+            if let watchedPaths {
+                subscription = await registry.subscribe(paths: watchedPaths)
+            } else {
+                subscription = nil
+            }
+            let applied = await MainActor.run { [weak self] in
+                guard let self else { return false }
+                self.applyWorkspaceGitMetadataWatcherDescriptor(
                     watchedPaths,
+                    subscription: subscription,
                     for: key,
                     request: request
                 )
+                return true
+            }
+            if !applied, let subscription {
+                await registry.release(subscription.token)
             }
         }
     }
 
     private func applyWorkspaceGitMetadataWatcherDescriptor(
         _ watchedPaths: [String]?,
+        subscription: WorkspaceGitMetadataWatcherSubscriptionResult?,
         for key: WorkspaceGitProbeKey,
         request: WorkspaceGitMetadataWatcherDescriptorRequest
     ) {
+        // A stale request (the directory changed while paths were being
+        // resolved / subscribed) is dropped. Release the subscription if one
+        // was created so the shared source refcounts correctly.
         guard workspaceGitMetadataWatcherDescriptorRequestsByKey[key] == request else {
+            releaseSubscriptionIfPresent(subscription)
             return
         }
         workspaceGitMetadataWatcherDescriptorRequestsByKey.removeValue(forKey: key)
@@ -60,41 +85,74 @@ extension SidebarGitMetadataService {
               workspaceGitTrackedDirectoryByKey[key] == request.directory,
               let watchedPaths else {
             stopWorkspaceGitMetadataWatcher(for: key)
+            releaseSubscriptionIfPresent(subscription)
             return
         }
 
         let watchedPathsKey = WorkspaceGitMetadataWatchedPathsKey(paths: watchedPaths)
-        if workspaceGitMetadataWatchersByWatchedPathsKey[watchedPathsKey] != nil {
+        if workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey[watchedPathsKey] != nil {
+            // Another probe key already subscribed to this path set while we
+            // were resolving; attach to the existing subscription and release
+            // the redundant one.
             setWorkspaceGitMetadataWatcherWatchedPathsKey(watchedPathsKey, for: key)
             moveWorkspaceGitSnapshotCacheEligibility(for: key, to: request.directory)
+            releaseSubscriptionIfPresent(subscription)
             return
         }
 
         stopWorkspaceGitMetadataWatcher(for: key)
-        if let watcher = RecursivePathWatcher(paths: watchedPaths) {
-            workspaceGitMetadataWatchersByWatchedPathsKey[watchedPathsKey] = watcher
-            setWorkspaceGitMetadataWatcherWatchedPathsKey(watchedPathsKey, for: key)
-            moveWorkspaceGitSnapshotCacheEligibility(for: key, to: request.directory)
-            let events = watcher.events
-            workspaceGitMetadataWatcherRefreshTasksByWatchedPathsKey[watchedPathsKey] = Task { @MainActor [weak self] in
-                for await _ in events {
-                    guard let self else { break }
-                    let keys = self.recordWorkspaceGitMetadataFilesystemEvent(
-                        forWatchedPathsKey: watchedPathsKey
-                    )
-                    for key in keys {
-                        self.scheduleWorkspaceGitMetadataRefreshIfPossible(
-                            workspaceId: key.workspaceId,
-                            panelId: key.panelId,
-                            reason: "filesystemEvent"
-                        )
-                    }
-                }
-            }
-        } else {
+        guard let subscription else {
+            // The source factory could not create a watcher for these paths
+            // (e.g. RecursivePathWatcher rejected them). Track the source
+            // directory for cache eligibility but install no watcher.
             setWorkspaceGitMetadataWatcherSourceDirectory(request.directory, for: key)
             setWorkspaceGitMetadataWatcherWatchedPathsKey(nil, for: key)
+            return
         }
+
+        // Install the shared subscription: one listener task pumps registry
+        // events into the per-probe-key fan-out. The task is cancelled
+        // synchronously by stop/deinit; its defer releases the token
+        // asynchronously without capturing self (only the Sendable registry
+        // actor and the Sendable token).
+        let registry = workspaceGitMetadataWatcherRegistry
+        let token = subscription.token
+        let events = subscription.events
+        let listenerTask = Task { @MainActor [weak self] in
+            for await _ in events {
+                guard let self else { break }
+                let keys = self.recordWorkspaceGitMetadataFilesystemEvent(
+                    forWatchedPathsKey: watchedPathsKey
+                )
+                for key in keys {
+                    self.scheduleWorkspaceGitMetadataRefreshIfPossible(
+                        workspaceId: key.workspaceId,
+                        panelId: key.panelId,
+                        reason: "filesystemEvent"
+                    )
+                }
+            }
+            // Listener exited (stream finished or self gone). Release the
+            // token asynchronously without capturing self.
+            Task { await registry.release(token) }
+        }
+        workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey[watchedPathsKey] = WorkspaceGitMetadataWatcherSubscription(
+            listenerTask: listenerTask,
+            token: token
+        )
+        setWorkspaceGitMetadataWatcherWatchedPathsKey(watchedPathsKey, for: key)
+        moveWorkspaceGitSnapshotCacheEligibility(for: key, to: request.directory)
+    }
+
+    /// Releases a registry subscription asynchronously without capturing
+    /// `self`. Called when a subscription was created but never installed
+    /// (stale request, setting disabled, or another probe key already held
+    /// the shared subscription).
+    private func releaseSubscriptionIfPresent(_ subscription: WorkspaceGitMetadataWatcherSubscriptionResult?) {
+        guard let subscription else { return }
+        let registry = workspaceGitMetadataWatcherRegistry
+        let token = subscription.token
+        Task { await registry.release(token) }
     }
 
     func workspaceGitSnapshotCacheGeneration(directory: String) -> UInt64? {
@@ -143,11 +201,18 @@ extension SidebarGitMetadataService {
             workspaceGitMetadataWatcherProbeKeysByWatchedPathsKey[previousWatchedPathsKey]?.remove(key)
             if workspaceGitMetadataWatcherProbeKeysByWatchedPathsKey[previousWatchedPathsKey]?.isEmpty == true {
                 workspaceGitMetadataWatcherProbeKeysByWatchedPathsKey.removeValue(forKey: previousWatchedPathsKey)
-                workspaceGitMetadataWatcherRefreshTasksByWatchedPathsKey
-                    .removeValue(forKey: previousWatchedPathsKey)?
-                    .cancel()
-                // Dropping the last watcher reference invalidates the FSEventStream.
-                workspaceGitMetadataWatchersByWatchedPathsKey.removeValue(forKey: previousWatchedPathsKey)
+                // Last probe key detached: cancel the listener task and
+                // asynchronously release the registry token (without
+                // capturing self). The registry stops the underlying
+                // RecursivePathWatcher when the last subscriber for this
+                // path set releases.
+                if let subscription = workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey
+                    .removeValue(forKey: previousWatchedPathsKey) {
+                    subscription.listenerTask.cancel()
+                    let registry = workspaceGitMetadataWatcherRegistry
+                    let token = subscription.token
+                    Task { await registry.release(token) }
+                }
             }
         }
         guard let watchedPathsKey else { return }
@@ -224,13 +289,17 @@ extension SidebarGitMetadataService {
     }
 
     func stopAllWorkspaceGitMetadataWatchers() {
-        for task in workspaceGitMetadataWatcherRefreshTasksByWatchedPathsKey.values {
-            task.cancel()
+        // Cancel every listener task and asynchronously release each registry
+        // token without capturing self. The registry stops the underlying
+        // RecursivePathWatcher for each path set when its last subscriber
+        // releases.
+        let registry = workspaceGitMetadataWatcherRegistry
+        for subscription in workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey.values {
+            subscription.listenerTask.cancel()
+            let token = subscription.token
+            Task { await registry.release(token) }
         }
-        workspaceGitMetadataWatcherRefreshTasksByWatchedPathsKey.removeAll()
-        // Dropping the references runs each watcher's deinit synchronously,
-        // invalidating its FSEventStream.
-        workspaceGitMetadataWatchersByWatchedPathsKey.removeAll()
+        workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey.removeAll()
         workspaceGitMetadataWatcherSourceDirectoryByKey.removeAll()
         workspaceGitMetadataWatcherKeysBySourceDirectory.removeAll()
         workspaceGitMetadataWatcherWatchedPathsKeyByProbeKey.removeAll()

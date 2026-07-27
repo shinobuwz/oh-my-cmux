@@ -2745,6 +2745,13 @@ final class BrowserPanel: Panel, ObservableObject {
     }
     private var pendingWebContentRecoveryURL: URL?
 
+    /// Consecutive WebContent process terminations since the last non-`about:blank`
+    /// main-frame commit. The first non-empty termination auto-recovers
+    /// (replace + reload); a second before the replacement commits opens the
+    /// render circuit instead of building another doomed webview. A non-blank
+    /// main-frame commit resets it to zero.
+    private var consecutiveWebContentTerminationCount = 0
+
     /// Prevent the omnibar from auto-focusing for a short window after explicit programmatic focus.
     /// This avoids races where SwiftUI focus state steals first responder back from WebKit.
     private var suppressOmnibarAutofocusUntil: Date?
@@ -3380,6 +3387,10 @@ final class BrowserPanel: Panel, ObservableObject {
 
     @discardableResult
     func reactivateDiscardedWebViewWithoutNavigation(reason: String) -> Bool {
+        // Re-rendering a discarded page must not cross an open termination
+        // circuit; refuse so the caller drives an explicit Retry/reset first.
+        // Only Retry or an explicit profile/context/discard reset may close it.
+        guard !hasRecoverableWebContentTermination else { return false }
         let reactivated = hiddenWebViewDiscardManager.reactivateWithoutNavigation(reason: reason) {
             shouldRenderWebView = true
         }
@@ -3802,6 +3813,7 @@ final class BrowserPanel: Panel, ObservableObject {
                 // An about:blank placeholder leaves the restore-stall detector armed.
                 if !Self.isAboutBlankURL(webView.url) {
                     self.hasCommittedDocumentSinceWebViewReplacement = true
+                    self.consecutiveWebContentTerminationCount = 0
                 }
                 // Reset playback tracking only once the new top-level document has replaced
                 // the old one. Resetting earlier (on provisional
@@ -4742,6 +4754,7 @@ final class BrowserPanel: Panel, ObservableObject {
         replacement.pageZoom = desiredZoom
         webViewInstanceID = UUID()
         hasCommittedDocumentSinceWebViewReplacement = false; userStoppedLoadSinceWebViewReplacement = false
+        consecutiveWebContentTerminationCount = 0
         resetWebViewLifecycleMetadata(resetVisibility: false)
         webView = replacement
         currentURL = restoreURL
@@ -5189,12 +5202,58 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     private func replaceWebViewAfterContentProcessTermination(for terminatedWebView: WKWebView) {
-        replaceWebViewPreservingState(
-            from: terminatedWebView,
-            websiteDataStore: websiteDataStore,
-            reason: "webcontent_process_terminated",
-            waitForManualRecovery: true
+        // Stale callback (a previously-replaced webview firing a late
+        // termination) or a panel whose render circuit is already open from a
+        // prior second termination: repeated and stale callbacks no-op.
+        guard terminatedWebView === webView, !hasRecoverableWebContentTermination else {
+            return
+        }
+
+        let wasRenderable = shouldRenderWebView
+        let attemptedURL = Self.remoteProxyDisplayURL(for: navigationDelegate?.lastAttemptedURL)
+            ?? navigationDelegate?.lastAttemptedURL
+        let liveURL = restorableDisplayURLForCurrentErrorPage(liveURL: terminatedWebView.url)
+        let restoreURL = (isMainFrameProvisionalNavigationActive ? attemptedURL : nil)
+            ?? liveURL
+            ?? attemptedURL
+            ?? resolvedCurrentSessionHistoryURL()
+        let restoreURLString = restoreURL?.absoluteString
+        let hasRecoveryTarget = restoreURLString != nil && restoreURLString != blankURLString
+
+        // Empty current (blank new tab with nothing to recover): no budget spent.
+        guard wasRenderable || hasRecoveryTarget else {
+            return
+        }
+
+        if consecutiveWebContentTerminationCount == 0 {
+            // First non-empty termination: auto-replace + reload, no recovery overlay.
+            consecutiveWebContentTerminationCount = 1
+            replaceWebViewPreservingState(
+                from: terminatedWebView,
+                websiteDataStore: websiteDataStore,
+                reason: "webcontent_process_terminated",
+                waitForManualRecovery: false
+            )
+            return
+        }
+
+        // Second consecutive termination before the replacement committed a
+        // non-`about:blank` main frame: open the render circuit. Do NOT
+        // construct another doomed replacement. Save the restore URL for
+        // manual recovery (reload / re-navigate).
+        consecutiveWebContentTerminationCount &+= 1
+        pendingWebContentRecoveryURL = restoreURL
+        hasRecoverableWebContentTermination = true
+        shouldRenderWebView = false
+        refreshNavigationAvailability()
+
+#if DEBUG
+        cmuxDebugLog(
+            "browser.webcontent.circuit.open panel=\(id.uuidString.prefix(5)) " +
+            "count=\(consecutiveWebContentTerminationCount) " +
+            "restoreURL=\(restoreURLString ?? "nil")"
         )
+#endif
     }
     func replaceWebViewPreservingState(
         from oldWebView: WKWebView,
@@ -5316,6 +5375,17 @@ final class BrowserPanel: Panel, ObservableObject {
         guard hasRecoverableWebContentTermination else { return false }
         let recoveryURL = pendingWebContentRecoveryURL
         clearWebContentTerminationRecovery()
+        // Manual retry starts a new recovery attempt. Reset the circuit budget
+        // before building the fresh WKWebView so one pre-commit termination can
+        // still auto-recover; only a second consecutive termination reopens the
+        // circuit.
+        consecutiveWebContentTerminationCount = 0
+        replaceWebViewPreservingState(
+            from: webView,
+            websiteDataStore: websiteDataStore,
+            reason: "webcontent_process_recovery",
+            waitForManualRecovery: false
+        )
 #if DEBUG
         cmuxDebugLog(
             "browser.webcontent.recover panel=\(id.uuidString.prefix(5)) " +
@@ -5863,6 +5933,13 @@ final class BrowserPanel: Panel, ObservableObject {
         }
         cancelHiddenWebViewDiscard()
         if usesRemoteWorkspaceProxy, remoteProxyEndpoint == nil {
+            // An open termination circuit refuses navigation; a pending-remote
+            // restart is never queued over a circuit-open (non-rendering) pane.
+            // Only Retry or an explicit reset may close the circuit.
+            guard !hasRecoverableWebContentTermination else {
+                onNavigationStarted?(nil)
+                return nil
+            }
             pendingRemoteNavigation?.onNavigationStarted?(nil)
             pendingRemoteNavigation = PendingRemoteNavigation(
                 request: request,
@@ -5918,7 +5995,15 @@ final class BrowserPanel: Panel, ObservableObject {
         onNavigationStarted: ((WKNavigation?) -> Void)? = nil
     ) -> WKNavigation? {
         cancelHiddenWebViewDiscard()
-        clearWebContentTerminationRecovery()
+        // An open termination circuit refuses ordinary navigation; an explicit
+        // Retry/reset must close the circuit first. Retry clears before it
+        // reaches here, and replaceWebViewPreservingState clears on its
+        // restore-navigate path, so those proceed; a stray typed navigation
+        // while the circuit is open is refused.
+        guard !hasRecoverableWebContentTermination else {
+            onNavigationStarted?(nil)
+            return nil
+        }
         if !preserveRestoredSessionHistory {
             abandonRestoredSessionHistoryIfNeeded()
         }
@@ -6353,6 +6438,7 @@ extension BrowserPanel {
         )
         webViewInstanceID = UUID()
         hasCommittedDocumentSinceWebViewReplacement = false; userStoppedLoadSinceWebViewReplacement = false
+        consecutiveWebContentTerminationCount = 0
         webView = replacement
         shouldRenderWebView = false
         refreshWebViewLifecycleState()

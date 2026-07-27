@@ -43,6 +43,24 @@ public actor RecursivePathWatcher {
     /// ``stop()`` is called or the watcher is deallocated.
     public nonisolated let events: AsyncStream<RecursivePathWatcherEvent>
 
+    /// The process-wide count of currently active `FSEventStream` instances owned
+    /// by `RecursivePathWatcher`.
+    ///
+    /// This is a production diagnostic, not a correctness gate: it reflects how
+    /// many real filesystem event streams the process is keeping alive right now.
+    /// Each successful watcher creation increments it exactly once; each `stop()`
+    /// — or watcher deallocation — decrements it exactly once. The decrement is
+    /// non-underflowing, so repeated stops and a `deinit` after an explicit stop
+    /// never drive the count negative. A value that never returns to its baseline
+    /// signals a watcher whose `FSEventStream` was started but never torn down.
+    ///
+    /// The value is a best-effort snapshot taken with relaxed atomic ordering; it
+    /// is not bound to any isolation domain and may change between a read and its
+    /// use.
+    public nonisolated static var activeStreamCount: UInt64 {
+        FileSystemEventStream.activeStreamCount
+    }
+
     private let continuation: AsyncStream<RecursivePathWatcherEvent>.Continuation
     private let clock: any FileWatchClock
     // nil only for the test-throttle initializer, which drives the throttle

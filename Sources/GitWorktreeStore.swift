@@ -76,78 +76,6 @@ enum GitWorktreeError: LocalizedError, Equatable {
     }
 }
 
-// MARK: - Git process runner
-
-/// Runs `git` via `/usr/bin/env` with separate stdout/stderr capture.
-///
-/// stdout and stderr are drained on detached utility tasks *after* the process
-/// has started and *before* `waitUntilExit()`. This is the only ordering that
-/// avoids both deadlocks: starting readers before `run()` succeeds would block
-/// forever on a pipe whose write end never connects if `run()` throws, while
-/// waiting for exit before reading would block once output exceeds the pipe
-/// buffer. The captured `FileHandle`s are wrapped in an `@unchecked Sendable`
-/// holder (matching the existing `CmuxExtensionPipeOutputCollector` pattern) so
-/// the drain tasks stay Sendable-clean under Swift 6 concurrency.
-private enum GitWorktreeProcess {
-    struct Output: Sendable, Equatable {
-        let status: Int32
-        let stdout: String
-        let stderr: String
-    }
-
-    private struct FileHandleReader: @unchecked Sendable {
-        let handle: FileHandle
-        func readToEnd() -> Data { handle.readDataToEndOfFileOrEmpty() }
-    }
-
-    /// Runs `git <arguments>` with its working directory set to `directory`.
-    ///
-    /// `nonLocking` sets `GIT_OPTIONAL_LOCKS=0` for read-only commands so a
-    /// concurrent `git` in another surface cannot block the worktree listing.
-    /// Mutating commands (`worktree add`/`remove`/`prune`) must run with the
-    /// full environment and therefore pass `nonLocking: false`.
-    static func run(
-        in directory: String,
-        arguments: [String],
-        nonLocking: Bool = false,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) async -> Output {
-        await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["git"] + arguments
-            process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
-            var env = environment
-            if nonLocking { env["GIT_OPTIONAL_LOCKS"] = "0" }
-            process.environment = env
-
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            do {
-                try process.run()
-            } catch {
-                return Output(status: -1, stdout: "", stderr: error.localizedDescription)
-            }
-
-            let stdoutReader = FileHandleReader(handle: stdoutPipe.fileHandleForReading)
-            let stderrReader = FileHandleReader(handle: stderrPipe.fileHandleForReading)
-            let stdoutTask = Task.detached(priority: .utility) { stdoutReader.readToEnd() }
-            let stderrTask = Task.detached(priority: .utility) { stderrReader.readToEnd() }
-
-            process.waitUntilExit()
-            let stdoutData = await stdoutTask.value
-            let stderrData = await stderrTask.value
-            return Output(
-                status: process.terminationStatus,
-                stdout: String(data: stdoutData, encoding: .utf8) ?? "",
-                stderr: String(data: stderrData, encoding: .utf8) ?? ""
-            )
-        }.value
-    }
-}
 
 // MARK: - Store
 
@@ -156,8 +84,8 @@ private enum GitWorktreeProcess {
 /// All mutations happen on the main actor. Repository root paths are persisted
 /// as a JSON-encoded `[String]` in `UserDefaults`; nothing is written to
 /// `cmux.json`, repo-local config, or `.git/info/exclude`. Every git operation
-/// goes through `git` on the CLI — there is no in-process libgit2 and no
-/// third-party registration.
+/// goes through `git` on the CLI via the injected ``CommandRunning`` seam —
+/// there is no in-process libgit2 and no third-party registration.
 @MainActor
 final class GitWorktreeStore: ObservableObject {
     /// Current repository snapshots, ordered by registration. Each carries its
@@ -177,9 +105,25 @@ final class GitWorktreeStore: ObservableObject {
     static let repositoryRootsDefaultsKey = "cmux.gitWorktrees.repositoryRoots"
 
     private let defaults: UserDefaults
+    private let commandRunner: any CommandRunning
+    private let gitTimeout: TimeInterval
 
-    init(defaults: UserDefaults = .standard) {
+    /// Creates a worktree store.
+    ///
+    /// - Parameters:
+    ///   - defaults: The `UserDefaults` holding the persisted repository roots.
+    ///   - commandRunner: The ``CommandRunning`` seam that spawns `git`. Inject
+    ///     a fake in tests so they never spawn a real process.
+    ///   - gitTimeout: The finite deadline (seconds) for each `git` invocation;
+    ///     the deadline is the cancellation safety net for a dropped call.
+    init(
+        defaults: UserDefaults = .standard,
+        commandRunner: any CommandRunning = CommandRunner(),
+        gitTimeout: TimeInterval = 30
+    ) {
         self.defaults = defaults
+        self.commandRunner = commandRunner
+        self.gitTimeout = gitTimeout
         Task { await loadPersistedRepositories() }
     }
 
@@ -248,7 +192,7 @@ final class GitWorktreeStore: ObservableObject {
             .flatMap { $0.isEmpty ? nil : $0 }
         ?? Self.defaultWorktreeDestination(repositoryRoot: repositoryRoot, branchName: trimmedBranch)
 
-        let result = await GitWorktreeProcess.run(
+        let result = await runGit(
             in: repositoryRoot,
             arguments: ["worktree", "add", "-b", trimmedBranch, resolvedDestination, "HEAD"]
         )
@@ -275,7 +219,7 @@ final class GitWorktreeStore: ObservableObject {
         var arguments = ["worktree", "remove"]
         if force { arguments.append("--force") }
         arguments.append(path)
-        let result = await GitWorktreeProcess.run(in: repositoryRoot, arguments: arguments)
+        let result = await runGit(in: repositoryRoot, arguments: arguments)
         guard result.status == 0 else {
             let error = GitWorktreeError.commandFailed(
                 stderr: result.stderr,
@@ -287,13 +231,13 @@ final class GitWorktreeStore: ObservableObject {
             lastErrorMessage = error.errorDescription
             throw error
         }
-        _ = await GitWorktreeProcess.run(in: repositoryRoot, arguments: ["worktree", "prune"])
+        _ = await runGit(in: repositoryRoot, arguments: ["worktree", "prune"])
         await refresh(repositoryRoot: repositoryRoot)
     }
 
     /// Prunes stale worktree metadata (`worktree prune`) and refreshes.
     func pruneWorktrees(repositoryRoot: String) async {
-        _ = await GitWorktreeProcess.run(in: repositoryRoot, arguments: ["worktree", "prune"])
+        _ = await runGit(in: repositoryRoot, arguments: ["worktree", "prune"])
         await refresh(repositoryRoot: repositoryRoot)
     }
 
@@ -304,7 +248,7 @@ final class GitWorktreeStore: ObservableObject {
             return
         }
         repositories[index].isRefreshing = true
-        let result = await GitWorktreeProcess.run(
+        let result = await runGit(
             in: repositoryRoot,
             arguments: ["worktree", "list", "--porcelain"],
             nonLocking: true
@@ -386,10 +330,67 @@ final class GitWorktreeStore: ObservableObject {
         }
     }
 
+    // MARK: - Git execution
+
+    /// The captured outcome of one `git` invocation, shaped for the store's
+    /// call sites. `status == 0` is the success gate; `stderr` carries the
+    /// diagnostic on failure.
+    private struct GitCommandOutput: Sendable, Equatable {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    /// Runs `git <arguments>` in `directory` via the injected
+    /// ``CommandRunning`` seam with a finite deadline.
+    ///
+    /// `nonLocking` runs `/usr/bin/env GIT_OPTIONAL_LOCKS=0 git …` so a
+    /// concurrent `git` in another surface cannot block the worktree listing;
+    /// mutating commands (`worktree add`/`remove`/`prune`) pass
+    /// `nonLocking: false` and run `git …` directly. A cancelled task
+    /// short-circuits before spawning, and the deadline bounds any in-flight
+    /// invocation even if the caller never cancels.
+    private func runGit(
+        in directory: String,
+        arguments: [String],
+        nonLocking: Bool = false
+    ) async -> GitCommandOutput {
+        if Task.isCancelled {
+            return GitCommandOutput(status: -1, stdout: "", stderr: "cancelled")
+        }
+        let executable: String
+        let fullArguments: [String]
+        if nonLocking {
+            executable = "/usr/bin/env"
+            fullArguments = ["GIT_OPTIONAL_LOCKS=0", "git"] + arguments
+        } else {
+            executable = "git"
+            fullArguments = arguments
+        }
+        let result = await commandRunner.run(
+            directory: directory,
+            executable: executable,
+            arguments: fullArguments,
+            timeout: gitTimeout
+        )
+        if result.timedOut {
+            return GitCommandOutput(
+                status: -1,
+                stdout: result.stdout ?? "",
+                stderr: "git command timed out after \(gitTimeout) seconds"
+            )
+        }
+        return GitCommandOutput(
+            status: result.exitStatus ?? -1,
+            stdout: result.stdout ?? "",
+            stderr: result.stderr ?? result.executionError ?? ""
+        )
+    }
+
     // MARK: - Git resolution & parsing
 
     private func resolveRepositoryRoot(path: String) async -> String? {
-        let result = await GitWorktreeProcess.run(
+        let result = await runGit(
             in: path,
             arguments: ["rev-parse", "--show-toplevel"],
             nonLocking: true

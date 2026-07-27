@@ -58,6 +58,8 @@ public final class TerminalSurface: Identifiable, ObservableObject {
     public typealias ClaudeCommandShim = TerminalSurfaceClaudeCommandShim
     public typealias CodexCommandShim = TerminalSurfaceCodexCommandShim
     public typealias CmuxContextEnvironment = TerminalSurfaceCmuxContextEnvironment
+    /// Observable native-runtime creation state for panel error and Retry UI.
+    public let runtimeCreationState: TerminalRuntimeCreationState
     private var runtimeSurface: ghostty_surface_t?
     /// The live runtime surface pointer, or nil before creation/after teardown.
     public internal(set) var surface: ghostty_surface_t? {
@@ -260,7 +262,6 @@ public final class TerminalSurface: Identifiable, ObservableObject {
     var claudeCommandShimInstallTask: Task<ClaudeCommandShim?, Never>?
     var claudeCommandShimCompletionTask: Task<Void, Never>?
     var claudeCommandShimInstallCompleted = false
-    var claudeCommandShimPendingCreationSource: RuntimeSurfaceCreationSource?
     /// The retained byte-tee lease for the libghostty PTY tee callback (cmux
     /// fork extension). Installed in `createSurface` after
     /// `ghostty_surface_new` succeeds. The Mac sync server reads the tee'd
@@ -291,6 +292,7 @@ public final class TerminalSurface: Identifiable, ObservableObject {
     var needsConfirmCloseOverrideForTesting: Bool?
     var runtimeSurfaceFreedOutOfBandForTesting = false
     var runtimeSurfaceCreateAttemptCountForTesting = 0
+    @MainActor static var failNextRuntimeSurfaceCreationForDebug = false
     // Same off-isolation-reader carve-out as debugMetadataLock.
     let debugForceRefreshCountLock = NSLock()
     var debugForceRefreshCountValue = 0
@@ -470,6 +472,7 @@ public final class TerminalSurface: Identifiable, ObservableObject {
         preparePaneHost: @Sendable @MainActor (any TerminalSurfacePaneHosting) -> Void = { _ in },
         dependencies: TerminalSurfaceRuntimeDependencies
     ) {
+        self.runtimeCreationState = TerminalRuntimeCreationState()
         self.id = id
         self.tabId = tabId
         self.surfaceContext = context

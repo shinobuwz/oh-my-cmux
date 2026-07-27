@@ -224,7 +224,11 @@ extension BrowserPanel {
         expectedWebViewIdentifier: ObjectIdentifier,
         reason: String
     ) -> Bool {
-        guard ObjectIdentifier(webView) == expectedWebViewIdentifier, canRecoverFromAutomationTimeout else { return false }
+        guard ObjectIdentifier(webView) == expectedWebViewIdentifier,
+              canRecoverFromAutomationTimeout,
+              !hasRecoverableWebContentTermination else {
+            return false
+        }
         replaceWebViewPreservingState(
             from: webView,
             websiteDataStore: websiteDataStore,

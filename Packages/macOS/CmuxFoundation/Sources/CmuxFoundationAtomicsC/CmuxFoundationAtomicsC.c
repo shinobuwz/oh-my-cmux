@@ -52,3 +52,19 @@ uint64_t CmuxAtomicUInt64AdvanceRelaxed(CmuxAtomicUInt64Storage *storage) {
     }
     return UINT64_MAX;
 }
+
+uint64_t CmuxAtomicUInt64DecrementRelaxed(CmuxAtomicUInt64Storage *storage) {
+    uint64_t current = atomic_load_explicit(&storage->value, memory_order_relaxed);
+    while (current != 0) {
+        uint64_t next = current - 1;
+        if (atomic_compare_exchange_weak_explicit(
+                &storage->value,
+                &current,
+                next,
+                memory_order_relaxed,
+                memory_order_relaxed)) {
+            return next;
+        }
+    }
+    return 0;
+}

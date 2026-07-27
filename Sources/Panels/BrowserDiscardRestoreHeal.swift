@@ -57,6 +57,10 @@ extension BrowserPanel {
         allowBlankShellHeal: Bool = true,
         forceRestartPendingRestore: Bool = false
     ) -> Bool {
+        // A repeated WebContent termination opens a manual-recovery circuit.
+        // Visibility, discard restore, and automation touches must not remount
+        // the failed web view and silently restart the crash loop.
+        guard !hasRecoverableWebContentTermination else { return false }
         if Self.isRestoreStalled(
             isRestoreNavigationPending: hiddenWebViewDiscardManager.isRestoreNavigationPending,
             isWebViewLoading: webView.isLoading,
@@ -142,6 +146,7 @@ extension BrowserPanel {
     /// ``shouldTreatCommitAsDiscardedRestoreCommit(from:)`` ignores, leaving the
     /// manager pending forever, so reactivate in place instead.
     func reactivateDiscardedPaneWithoutRestorableURL(reason: String) -> Bool {
+        guard !hasRecoverableWebContentTermination else { return false }
         guard reactivateDiscardedWebViewWithoutNavigation(reason: "\(reason).no_restore_url") else {
             return false
         }

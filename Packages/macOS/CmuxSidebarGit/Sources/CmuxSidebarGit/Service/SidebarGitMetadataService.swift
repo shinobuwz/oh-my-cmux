@@ -48,6 +48,12 @@ public final class SidebarGitMetadataService: SidebarGitMetadataServing {
     let mobileHostDeferral: MobileHostDeferralPolicy
     // Debug diagnostics sink (the app injects its debug logger in DEBUG).
     let debugLog: @Sendable (String) -> Void
+    // Shared filesystem-watcher registry: deduplicates RecursivePathWatcher
+    // sources by exact normalized path set across every window's service.
+    // Injected at the composition root (TabManager/AppDelegate) so windows
+    // observing the same repository share one FSEventStream; defaults to a
+    // fresh non-singleton instance for test compatibility.
+    let workspaceGitMetadataWatcherRegistry: WorkspaceGitMetadataWatcherRegistry
     // The window-side seam; set once via attach(host:). Weak: the host owns
     // this service.
     private(set) weak var host: (any SidebarGitHosting)?
@@ -62,8 +68,7 @@ public final class SidebarGitMetadataService: SidebarGitMetadataServing {
     var workspaceGitHeadSignatureByKey: [WorkspaceGitProbeKey: String] = [:]
     var workspaceGitMetadataWatcherSourceDirectoryByKey: [WorkspaceGitProbeKey: String] = [:]
     var workspaceGitMetadataWatcherKeysBySourceDirectory: [String: Set<WorkspaceGitProbeKey>] = [:]
-    var workspaceGitMetadataWatchersByWatchedPathsKey: [WorkspaceGitMetadataWatchedPathsKey: RecursivePathWatcher] = [:]
-    var workspaceGitMetadataWatcherRefreshTasksByWatchedPathsKey: [WorkspaceGitMetadataWatchedPathsKey: Task<Void, Never>] = [:]
+    var workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey: [WorkspaceGitMetadataWatchedPathsKey: WorkspaceGitMetadataWatcherSubscription] = [:]
     var workspaceGitMetadataWatcherWatchedPathsKeyByProbeKey: [WorkspaceGitProbeKey: WorkspaceGitMetadataWatchedPathsKey] = [:]
     var workspaceGitMetadataWatcherProbeKeysByWatchedPathsKey: [WorkspaceGitMetadataWatchedPathsKey: Set<WorkspaceGitProbeKey>] = [:]
     var workspaceGitMetadataWatcherDescriptorRequestsByKey: [WorkspaceGitProbeKey: WorkspaceGitMetadataWatcherDescriptorRequest] = [:]
@@ -89,6 +94,10 @@ public final class SidebarGitMetadataService: SidebarGitMetadataServing {
     ///   - clock: Retry/fallback clock; tests inject virtual time.
     ///   - mobileHostDeferral: Mobile-host deferral intervals.
     ///   - debugLog: Diagnostics sink; defaults to a no-op.
+    ///   - registry: Shared watcher registry; defaults to a fresh
+    ///     non-singleton instance for test compatibility. The app injects a
+    ///     process-shared instance so windows observing the same repository
+    ///     share one FSEventStream.
     public init(
         workspaceGitMetadataReader: any WorkspaceGitMetadataReading,
         gitMetadataService: GitMetadataService,
@@ -96,7 +105,8 @@ public final class SidebarGitMetadataService: SidebarGitMetadataServing {
         probeLimiter: WorkspaceGitMetadataProbeLimiter,
         clock: any GitPollClock = SystemGitPollClock(),
         mobileHostDeferral: MobileHostDeferralPolicy = .standard,
-        debugLog: @escaping @Sendable (String) -> Void = { _ in }
+        debugLog: @escaping @Sendable (String) -> Void = { _ in },
+        registry: WorkspaceGitMetadataWatcherRegistry = WorkspaceGitMetadataWatcherRegistry()
     ) {
         self.workspaceGitMetadataReader = workspaceGitMetadataReader
         self.gitMetadataService = gitMetadataService
@@ -105,6 +115,7 @@ public final class SidebarGitMetadataService: SidebarGitMetadataServing {
         self.clock = clock
         self.mobileHostDeferral = mobileHostDeferral
         self.debugLog = debugLog
+        self.workspaceGitMetadataWatcherRegistry = registry
     }
 
     deinit {
@@ -114,6 +125,18 @@ public final class SidebarGitMetadataService: SidebarGitMetadataServing {
         }
         for task in workspaceGitSnapshotTasksByDirectory.values {
             task.cancel()
+        }
+        // Cancel every watcher listener task and asynchronously release its
+        // registry token without capturing self. The tokens are Sendable
+        // (value types) and the registry is a Sendable actor, so the detached
+        // release task is safe to run after this deinit returns. The registry
+        // stops the underlying RecursivePathWatcher when the last subscriber
+        // for each path set releases.
+        let registry = workspaceGitMetadataWatcherRegistry
+        for subscription in workspaceGitMetadataWatcherSubscriptionsByWatchedPathsKey.values {
+            subscription.listenerTask.cancel()
+            let token = subscription.token
+            Task { await registry.release(token) }
         }
     }
 

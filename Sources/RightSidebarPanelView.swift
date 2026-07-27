@@ -432,7 +432,11 @@ struct RightSidebarPanelView: View {
                         sessionIndexStore.setCurrentDirectoryIfChanged(sessionIndexDirectory)
                     }
             case .diff:
-                GitDiffPanelView(directory: fileExplorerStore.rootPath, workspaceId: workspaceId)
+                GitDiffPanelView(
+                    directory: fileExplorerStore.rootPath,
+                    workspaceId: workspaceId,
+                    isVisible: fileExplorerState.isVisible
+                )
             case .feed:
                 FeedPanelView()
             case .dock:
@@ -588,7 +592,7 @@ extension NSView {
     }
 }
 
-private enum GitDiffFileStatus: String, Sendable {
+enum GitDiffFileStatus: String, Sendable {
     case modified
     case added
     case deleted
@@ -618,7 +622,7 @@ private enum GitDiffFileStatus: String, Sendable {
     }
 }
 
-private struct GitDiffFileSnapshot: Identifiable, Sendable {
+struct GitDiffFileSnapshot: Identifiable, Sendable {
     let id: String
     let path: String
     let status: GitDiffFileStatus
@@ -635,21 +639,38 @@ private struct GitDiffCommandOutput: Sendable {
 }
 
 @MainActor
-private final class GitDiffSnapshotStore: ObservableObject {
+final class GitDiffSnapshotStore: ObservableObject {
     @Published private(set) var files: [GitDiffFileSnapshot] = []
     @Published private(set) var isGitRepository = false
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
+    /// Subprocess runner injected at the seam. Production uses ``CommandRunner``;
+    /// tests inject a fake conforming type so no real `git` process is spawned.
+    private let commands: any CommandRunning
+    private let pollInterval: Duration
+    private let scanTimeout: TimeInterval
+
     private var directory = ""
-    private var refreshTask: Task<Void, Never>?
     private var scanTask: Task<Void, Never>?
+    private var pollTask: Task<Void, Never>?
+    private var isActive = false
     private var revision = 0
     private var refreshGeneration = 0
 
+    init(
+        commands: any CommandRunning = CommandRunner(),
+        pollInterval: Duration = .seconds(5),
+        scanTimeout: TimeInterval = 10
+    ) {
+        self.commands = commands
+        self.pollInterval = pollInterval
+        self.scanTimeout = scanTimeout
+    }
+
     deinit {
-        refreshTask?.cancel()
         scanTask?.cancel()
+        pollTask?.cancel()
     }
 
     func setDirectory(_ path: String) {
@@ -658,39 +679,61 @@ private final class GitDiffSnapshotStore: ObservableObject {
         directory = normalized
         revision &+= 1
         refreshGeneration &+= 1
-        refreshTask?.cancel()
-        scanTask?.cancel()
-        scanTask = nil
+        cancelScan()
         files = []
         errorMessage = nil
         isGitRepository = false
         isLoading = false
-        guard !normalized.isEmpty else { return }
+        guard !normalized.isEmpty, isActive else { return }
         refresh()
-        refreshTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
-                guard !Task.isCancelled, let self else { return }
-                self.refresh()
-            }
-        }
+    }
+
+    /// Begins scanning and the periodic refresh poll. Called when the Diff panel
+    /// becomes visible. Idempotent; triggers an immediate refresh so resuming
+    /// visibility shows fresh state without waiting for the next poll tick.
+    func start() {
+        guard !isActive else { return }
+        isActive = true
+        guard !directory.isEmpty else { return }
+        refresh()
+        startPolling()
+    }
+
+    /// Stops scanning and cancels the in-flight scan plus the poll task. Called
+    /// when the Diff panel is hidden, leaves Diff mode, or is torn down. Clears
+    /// `isLoading` so a stale in-flight result can never leave the panel stuck
+    /// "loading"; the generation/active guards also drop any late result.
+    func stop() {
+        guard isActive else { return }
+        isActive = false
+        cancelScan()
+        cancelPoll()
+        isLoading = false
     }
 
     func refresh(force: Bool = false) {
-        guard !directory.isEmpty else { return }
+        guard !directory.isEmpty, isActive else { return }
         if !force, isLoading { return }
         let path = directory
         let expectedRevision = revision
         refreshGeneration &+= 1
         let expectedGeneration = refreshGeneration
-        scanTask?.cancel()
+        cancelScan()
         isLoading = true
+        errorMessage = nil
+        let commands = self.commands
+        let timeout = scanTimeout
         scanTask = Task { [weak self] in
-            let result = await GitDiffSnapshotStore.loadSnapshot(at: path)
+            let result = await Self.loadSnapshot(
+                commands: commands,
+                at: path,
+                timeout: timeout
+            )
             guard let self,
                   expectedRevision == self.revision,
                   expectedGeneration == self.refreshGeneration,
-                  path == self.directory else { return }
+                  path == self.directory,
+                  self.isActive else { return }
             self.scanTask = nil
             self.isLoading = false
             switch result {
@@ -707,18 +750,85 @@ private final class GitDiffSnapshotStore: ObservableObject {
         }
     }
 
-    nonisolated static func loadPatch(
+    /// Loads a unified patch for one file off the main actor via the injected
+    /// runner so opening a diff never blocks the UI.
+    func loadPatch(
         at directory: String,
         relativePath: String,
         status: GitDiffFileStatus
     ) async -> Result<String, NSError> {
+        await Self.loadPatch(
+            commands: commands,
+            at: directory,
+            relativePath: relativePath,
+            status: status,
+            timeout: scanTimeout
+        )
+    }
+
+    private func startPolling() {
+        cancelPoll()
+        let interval = pollInterval
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                // Bounded, cancellable poll delay: the only intended behavior is
+                // "refresh every `interval` while visible"; cancelled on stop/deinit.
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled, let self else { return }
+                self.refresh()
+            }
+        }
+    }
+
+    private func cancelScan() {
+        scanTask?.cancel()
+        scanTask = nil
+    }
+
+    private func cancelPoll() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    // MARK: - Snapshot loading (off the main actor; uses the injected runner)
+
+    nonisolated private static func loadSnapshot(
+        commands: any CommandRunning,
+        at directory: String,
+        timeout: TimeInterval
+    ) async -> Result<[GitDiffFileSnapshot], NSError> {
+        let result = await runGit(
+            commands: commands,
+            at: directory,
+            arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            timeout: timeout
+        )
+        switch result {
+        case .success(let output) where output.status == 0:
+            return .success(parseStatuses(output.standardOutput))
+        case .success(let output):
+            return .failure(commandError(output, fallback: String(localized: "gitWorktrees.diff.statusFailed", defaultValue: "Git status failed.")))
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    nonisolated private static func loadPatch(
+        commands: any CommandRunning,
+        at directory: String,
+        relativePath: String,
+        status: GitDiffFileStatus,
+        timeout: TimeInterval
+    ) async -> Result<String, NSError> {
         if status == .untracked {
             let result = await runGit(
+                commands: commands,
                 at: directory,
                 arguments: [
                     "diff", "--no-index", "--no-ext-diff", "--no-color", "--unified=3",
                     "--", "/dev/null", relativePath
-                ]
+                ],
+                timeout: timeout
             )
             switch result {
             case .success(let output) where output.status == 0 || output.status == 1:
@@ -731,8 +841,10 @@ private final class GitDiffSnapshotStore: ObservableObject {
         }
 
         let headResult = await runGit(
+            commands: commands,
             at: directory,
-            arguments: ["diff", "HEAD", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath]
+            arguments: ["diff", "HEAD", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath],
+            timeout: timeout
         )
         if case .success(let output) = headResult, output.status == 0 {
             return .success(String(decoding: output.standardOutput, as: UTF8.self))
@@ -750,12 +862,16 @@ private final class GitDiffSnapshotStore: ObservableObject {
         }
 
         let stagedResult = await runGit(
+            commands: commands,
             at: directory,
-            arguments: ["diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath]
+            arguments: ["diff", "--cached", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath],
+            timeout: timeout
         )
         let unstagedResult = await runGit(
+            commands: commands,
             at: directory,
-            arguments: ["diff", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath]
+            arguments: ["diff", "--no-ext-diff", "--no-color", "--unified=3", "--", relativePath],
+            timeout: timeout
         )
         var patch = Data()
         for result in [stagedResult, unstagedResult] {
@@ -772,21 +888,33 @@ private final class GitDiffSnapshotStore: ObservableObject {
         return .success("")
     }
 
-    nonisolated private static func loadSnapshot(
-        at directory: String
-    ) async -> Result<[GitDiffFileSnapshot], NSError> {
-        let result = await runGit(
-            at: directory,
-            arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    nonisolated private static func runGit(
+        commands: any CommandRunning,
+        at directory: String,
+        arguments: [String],
+        timeout: TimeInterval
+    ) async -> Result<GitDiffCommandOutput, NSError> {
+        let result = await commands.run(
+            directory: directory,
+            executable: "git",
+            arguments: ["--no-pager", "-C", directory] + arguments,
+            timeout: timeout
         )
-        switch result {
-        case .success(let output) where output.status == 0:
-            return .success(parseStatuses(output.standardOutput))
-        case .success(let output):
-            return .failure(commandError(output, fallback: String(localized: "gitWorktrees.diff.statusFailed", defaultValue: "Git status failed.")))
-        case .failure(let error):
-            return .failure(error)
+        if result.timedOut {
+            return .failure(NSError(domain: "GitDiff", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: String(localized: "gitWorktrees.diff.statusFailed", defaultValue: "Git status failed.")
+            ]))
         }
+        if let executionError = result.executionError {
+            return .failure(NSError(domain: "GitDiff", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: executionError
+            ]))
+        }
+        return .success(GitDiffCommandOutput(
+            status: result.exitStatus ?? -1,
+            standardOutput: Data((result.stdout ?? "").utf8),
+            standardError: Data((result.stderr ?? "").utf8)
+        ))
     }
 
     nonisolated private static func parseStatuses(_ data: Data) -> [GitDiffFileSnapshot] {
@@ -824,46 +952,6 @@ private final class GitDiffSnapshotStore: ObservableObject {
         return nil
     }
 
-    nonisolated private static func runGit(
-        at directory: String,
-        arguments: [String]
-    ) async -> Result<GitDiffCommandOutput, NSError> {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git", "-C", directory] + arguments
-        var environment = ProcessInfo.processInfo.environment
-        environment["GIT_OPTIONAL_LOCKS"] = "0"
-        environment["GIT_PAGER"] = "cat"
-        process.environment = environment
-
-        let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-        do {
-            try process.run()
-        } catch {
-            return .failure(NSError(domain: "GitDiff", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: error.localizedDescription
-            ]))
-        }
-
-        let outputTask = Task.detached(priority: .utility) {
-            standardOutput.fileHandleForReading.readDataToEndOfFile()
-        }
-        let errorTask = Task.detached(priority: .utility) {
-            standardError.fileHandleForReading.readDataToEndOfFile()
-        }
-        let output = await outputTask.value
-        let error = await errorTask.value
-        process.waitUntilExit()
-        return .success(GitDiffCommandOutput(
-            status: process.terminationStatus,
-            standardOutput: output,
-            standardError: error
-        ))
-    }
-
     nonisolated private static func commandError(
         _ output: GitDiffCommandOutput,
         fallback: String
@@ -884,14 +972,17 @@ private final class GitDiffSnapshotStore: ObservableObject {
 private struct GitDiffPanelView: View {
     let directory: String
     let workspaceId: UUID?
-    @StateObject private var store = GitDiffSnapshotStore()
+    let isVisible: Bool
+    @StateObject private var store: GitDiffSnapshotStore
     @State private var collapsedFolders: Set<String> = []
     @State private var selectedFilePath: String?
     @State private var openError: String?
 
-    init(directory: String, workspaceId: UUID?) {
+    init(directory: String, workspaceId: UUID?, isVisible: Bool) {
         self.directory = directory
         self.workspaceId = workspaceId
+        self.isVisible = isVisible
+        _store = StateObject(wrappedValue: GitDiffSnapshotStore())
     }
 
     var body: some View {
@@ -916,8 +1007,15 @@ private struct GitDiffPanelView: View {
                 changesList
             }
         }
-        .onAppear { store.setDirectory(directory) }
+        .onAppear {
+            store.setDirectory(directory)
+            if isVisible { store.start() } else { store.stop() }
+        }
         .onChange(of: directory) { _, newValue in store.setDirectory(newValue) }
+        .onChange(of: isVisible) { _, visible in
+            if visible { store.start() } else { store.stop() }
+        }
+        .onDisappear { store.stop() }
         .alert(
             String(localized: "gitWorktrees.diff.openError.title", defaultValue: "Unable to open diff"),
             isPresented: Binding(
@@ -1084,7 +1182,7 @@ private struct GitDiffPanelView: View {
             return
         }
         Task {
-            let result = await GitDiffSnapshotStore.loadPatch(
+            let result = await store.loadPatch(
                 at: directory,
                 relativePath: file.path,
                 status: file.status

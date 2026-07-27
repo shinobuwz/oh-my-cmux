@@ -24837,6 +24837,74 @@
         }
       }
     },
+    "browser.error.webContentTermination.diagnostics": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic retries are paused."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自動再試行は一時停止されています。"
+          }
+        }
+      }
+    },
+    "browser.error.webContentTermination.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The page process stopped repeatedly. cmux paused automatic retries to prevent a restart loop."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ページのプロセスが繰り返し停止しました。再起動ループを防ぐため、cmux は自動再試行を一時停止しました。"
+          }
+        }
+      }
+    },
+    "browser.error.webContentTermination.retry": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "再試行"
+          }
+        }
+      }
+    },
+    "browser.error.webContentTermination.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser Page Stopped"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ブラウザページが停止しました"
+          }
+        }
+      }
+    },
     "browser.externalOpenFailure.copyLink": {
       "extractionState": "manual",
       "localizations": {
@@ -73825,6 +73893,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "Відстань кнопок панелі інструментів браузера"
+          }
+        }
+      }
+    },
+    "debug.menu.failNextTerminalCreation": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fail Next New Terminal Creation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次の新規ターミナル作成を失敗させる"
+          }
+        }
+      }
+    },
+    "debug.menu.logWorkspaceGitWatcherMetrics": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Log Workspace Git Watcher Metrics"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース Git ウォッチャーのメトリクスをログに記録"
+          }
+        }
+      }
+    },
+    "debug.menu.reclaimHiddenTerminalRenderers": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reclaim Hidden Terminal Renderers"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "非表示ターミナルのレンダラーを解放"
+          }
+        }
+      }
+    },
+    "debug.menu.simulateBrowserWebContentTermination": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simulate Focused Browser WebContent Termination"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "フォーカス中のブラウザ WebContent 停止をシミュレート"
           }
         }
       }
@@ -218411,6 +218547,57 @@
           "stringUnit": {
             "state": "translated",
             "value": "エージェントは休止中"
+          }
+        }
+      }
+    },
+    "terminal.runtimeCreation.failed.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux couldn’t create the terminal runtime. Retry without closing this tab."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux はターミナルランタイムを作成できませんでした。このタブを閉じずに再試行してください。"
+          }
+        }
+      }
+    },
+    "terminal.runtimeCreation.failed.retry": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "再試行"
+          }
+        }
+      }
+    },
+    "terminal.runtimeCreation.failed.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terminal couldn’t start"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ターミナルを起動できませんでした"
           }
         }
       }
